@@ -115,9 +115,10 @@ Failed calls never panic; they return the error envelope:
 map[string]any{
 	"result": "ERROR",
 	"error": map[string]any{
-		"Code":    "API_404",      // API_<HTTP status>, or a library code such as RESPONSE
-		"Message": "The domain name you requested could not be found. Please check and try again.",
-		"Details": "The domain could not be found. Please check and try again.",
+		"Code":        "API_404", // API_<HTTP status>, CURL_<n>, or a library code such as RESPONSE
+		"Message":     "The domain name you requested could not be found. Please check and try again.",
+		"Details":     "The domain could not be found. Please check and try again.",
+		"GatewayCode": "Dna.DomainService:Domain:10007", // only with API_<status>, when the gateway sent its own code
 	},
 }
 ```
@@ -135,8 +136,7 @@ Three methods use a different shape, exactly as in php-dna:
 Go has no default arguments. The methods keep php-dna's parameter order and take every argument
 explicitly; the php-dna default is shown in each section below. A few zero values select the
 default for convenience: `GetCurrentBalance("")` means USD, `GetTldList(0)` means 20,
-`CheckAvailability(..., "")` means `create`, `SetForwarding(..., "")` means `Standard`, and
-`ModifyPrivacyProtectionStatus(..., "")` means `Owner request`.
+`CheckAvailability(..., "")` means `create` and `SetForwarding(..., "")` means `Standard`.
 `RegisterWithContactInfo` takes its four optional arguments in a `*RegisterOptions` (nil = defaults).
 `AddResourceRecordValue` and `ReplaceResourceRecordValue` take `ttl *int`: `nil` keeps the set's
 current TTL.
@@ -160,7 +160,8 @@ contacts = dna.AllRoles(contact)                 // the same contact for all fou
 contacts = dna.ContactsFromMap(map[string]map[string]any{ /* role => contact */ })
 ```
 
-Half-empty contacts are completed by `ValidateContact`'s rules before they are sent.
+Half-empty contacts are completed by `ValidateContact`'s rules before they are sent. Contacts are
+used by `RegisterWithContactInfo` and `SaveContacts`; transfers never send contacts.
 
 ### Method names
 
@@ -245,7 +246,8 @@ map[string]any{
 ```
 
 The register endpoint answers with a short record, so most fields are empty; call `GetDetails`
-afterwards for the full domain.
+afterwards for the full domain. When the gateway refuses the registration (HTTP 200 with
+`"success": false`) the result is an error with code `REGISTER_DOMAIN` and the gateway's message.
 
 </details>
 
@@ -264,6 +266,9 @@ result := client.Renew("example.com", 1)
 map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03-15T10:00:00"}}
 ```
 
+A refusal from the gateway (`"success": false`) returns code `RENEW_DOMAIN`; a success without an
+expiration date returns `DOMAIN_RENEW`.
+
 </details>
 
 <hr style="border: 4px solid #000; border-style: dashed;">
@@ -271,11 +276,13 @@ map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03
 ### Domain Transfer
 
 ```go
-result := client.Transfer("example.com", "Xy9#mK2$", 1, nil)
+result := client.Transfer("example.com", "Xy9#mK2$", 1)
 ```
 
-As in php-dna's facade, the contacts argument is not forwarded: the transfer request always carries
-an empty contact list. The result has the same shape as `GetDetails`.
+Transfers never send contacts: the registrar takes them over with the domain, so the request always
+carries an empty contact list and the method has no contacts parameter. The result has the same
+shape as `GetDetails`; a refusal from the gateway (`"success": false`) returns code
+`TRANSFER_DOMAIN` with the gateway's message.
 
 <details>
 <summary>Sample Output for Domain Transfer</summary>
@@ -512,13 +519,13 @@ result := client.ModifyNameServer("example.com", []string{"ns1.example.com", "ns
 ```
 
 A map is accepted too (its values are used in key order). Entries are trimmed, lower-cased, stripped
-of a trailing dot and de-duplicated before sending.
+of a trailing dot and de-duplicated before sending; the result reports that normalized list.
 
 <details>
 <summary>Sample Output for Nameserver Modification</summary>
 
 ```go
-map[string]any{"result": "OK", "data": map[string]any{"NameServers": []string{"ns1.example.com", "ns2.example.com"}}}
+map[string]any{"result": "OK", "data": map[string]any{"NameServers": []any{"ns1.example.com", "ns2.example.com"}}}
 ```
 
 </details>
@@ -616,6 +623,10 @@ map[string]any{"result": "OK", "data": map[string]any{"NameServer": "ns1.example
 result := client.ModifyPrivacyProtectionStatus("example.com", true, "Owner request")
 ```
 
+`status` is a bool or a value panels store: `true`, `1`, `"1"`, `"true"`, `"on"` and `"yes"` enable
+privacy, anything else (`"off"`, `"0"`, `false`, ...) disables it. The reason is kept for php-dna
+compatibility only and is not sent: the gateway has no such field.
+
 <details>
 <summary>Sample Output for Modify Domain Privacy</summary>
 
@@ -632,6 +643,9 @@ map[string]any{"result": "OK", "data": map[string]any{"PrivacyProtectionStatus":
 ```go
 result := client.GetContacts("example.com")
 ```
+
+Gateway contact types are matched case-insensitively (`Admin`/`Administrative`, `Tech`/`Technical`,
+`Registrant`/`Owner`, `Billing`); any other type is kept under its own capitalized name.
 
 <details>
 <summary>Sample Output for Get Domain Contacts</summary>
@@ -702,7 +716,7 @@ map[string]any{
 	"symbol":   "$",
 	"balances": []any{
 		map[string]any{"balance": "601.64", "currency": "USD", "symbol": "$"},
-		map[string]any{"balance": "1250.5", "currency": "TL", "symbol": "TL"},
+		map[string]any{"balance": "1250.50", "currency": "TL", "symbol": "TL"},
 	},
 }
 ```
@@ -733,8 +747,10 @@ map[string]any{
 }
 ```
 
-On failure: `ErrorCode` is `API_<status>`, `OperationMessage` the error message,
-`OperationResult` `"FAILED"` and `Balance` `"0.00"`.
+On failure: `ErrorCode` is `API_<status>` (or `CURL_<n>`), `OperationMessage` the error message,
+`OperationResult` `"FAILED"` and `Balance` `"0.00"`. The account only reports USD and TRY balances:
+for any other currency the result is `FAILED` with `ErrorCode: "BALANCE"` and
+`No EUR balance is reported for this account. Available: USD, TRY.`
 
 </details>
 
@@ -746,9 +762,11 @@ The gateway stores records as **sets** (one name + type with all its values) and
 replaces the whole set. Record names may be given as `@`, `""`, the zone apex, a relative label
 (`www`) or a full name (`www.example.com`); they are reduced to the relative label the gateway
 expects. Supported types: `A`, `AAAA`, `ALIAS`, `CAA`, `CNAME`, `DS`, `MX`, `NAPTR`, `PTR`, `SRV`,
-`TLSA`, `TXT` (others are rejected before any call). TTL is clamped to 1..86400. With `apply = true`
-(php-dna's default) changes are committed immediately; consecutive zone calls are kept at least one
-second apart because the gateway rate-limits bursts.
+`TLSA`, `TXT` (others are rejected before any call). TTL is clamped to 1..86400 and the result reports
+the upper-cased type and the TTL that were actually sent. With `apply = true` (php-dna's default)
+changes are committed immediately; when that apply fails, its error envelope is returned (the change
+stays staged). Consecutive zone calls are kept at least one second apart because the gateway
+rate-limits bursts.
 
 ```go
 // List: one row per value, names fully qualified
@@ -822,14 +840,20 @@ client.DeleteForwarding("example.com")
 // SetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// GetForwarding (no forwarding configured: Enabled false, still OK)
+// GetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"Enabled": true, "RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// DeleteForwarding
-map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com"}}
+// GetForwarding when no forwarding is configured
+map[string]any{"result": "OK", "data": map[string]any{"Enabled": false, "RedirectAddress": "", "ForwardType": ""}}
+
+// DeleteForwarding (Removed is false when nothing was configured)
+map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com", "Removed": true}}
 ```
 
 </details>
+
+Only the gateway's "Redirect information not found" answer means "not configured"; any other error,
+for example an unknown domain, is returned as an error.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -846,7 +870,8 @@ client.ValidateContact(map[string]any{"FirstName": " Jo ", "Phone": "+90 (532) 3
 
 `ValidateContact` fills missing fields with placeholders, removes digits and punctuation from names,
 falls back from State to City, maps common country names to ISO codes and splits phone and fax
-numbers into number and country code.
+numbers into number and country code. A number written with its own international prefix
+(`+44 20 ...`, `0044 20 ...`) keeps its own country code even when another one is given.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -867,16 +892,21 @@ per goroutine.
 
 ## Error handling
 
-- Gateway errors return `Code: "API_<HTTP status>"`. The message comes from the gateway; an empty
-  error body becomes `HTTP 429 - Too Many Requests` (and so on), validation errors are listed field by
+- Gateway errors return `Code: "API_<HTTP status>"`. When the gateway sent its own error code
+  (for example `Dna.DomainService:Domain:10007`), it is added as `GatewayCode`, so callers can tell
+  "domain not found" from "TLD not supported". The message comes from the gateway; an empty error
+  body becomes `HTTP 429 - Too Many Requests` (and so on), validation errors are listed field by
   field in `Details` (`Admin PostalCode - 'PostalCode' is required`), and backend boilerplate such as
-  `Exception of type '...' was thrown` is replaced by the useful details.
+  `Exception of type '...' was thrown` is replaced by the gateway's details, or by a stable message
+  naming the error code — never by the raw response body.
 - A 301/302 answer means the credentials were rejected: `Message: "Invalid API credentials"`.
 - Transport failures (timeout, DNS, TLS, connection reset) are errors, never an empty success. A
-  timeout returns `Code: "API_28"` and `Could not reach the DomainNameAPI service: the connection
-  timed out. (...)`; other failures use curl-style numbers (`API_6` DNS, `API_7` connect, `API_35`
-  TLS, `API_56` reset, `API_60` certificate) and `Curl error during request: ...`.
-  `GetParsedResponseData()["Code"]` holds `CURL_<n>`.
+  timeout returns `Code: "CURL_28"` and `Could not reach the DomainNameAPI service: the connection
+  timed out. (...)`; other failures use curl-style numbers (`CURL_6` DNS, `CURL_7` connect,
+  `CURL_35` TLS, `CURL_56` reset, `CURL_60` certificate) and `Curl error during request: ...`.
+  `API_<n>` is reserved for HTTP statuses.
+- Register, transfer and renew answers of HTTP 200 with `"success": false` are refusals:
+  `REGISTER_DOMAIN`, `TRANSFER_DOMAIN` or `RENEW_DOMAIN` with the gateway's message.
 - An empty or `null` success body returns `Code: "RESPONSE"`.
 - Timeouts: 30 seconds per call, 10 seconds to connect.
 
@@ -945,7 +975,7 @@ docker run --rm -v "$PWD":/src -w /src golang:1.23 go vet ./...
 ```
 
 The suite has unit tests for the HTTP layer, error mapping, telemetry and utilities, and a
-conformance test that replays all 126 php-dna fixtures from `testdata/conformance` (requests on the
+conformance test that replays all 134 php-dna fixtures from `testdata/conformance` (requests on the
 wire and return values must match php-dna exactly). No test touches the network.
 
 ## Return and Error Codes with Descriptions
@@ -962,9 +992,12 @@ wire and return values must match php-dna exactly). No test touches the network.
 | 2304 | Object status prohibits operation              | Domain status is not suitable for updates, locked for update operations. Status should not be "clientupdateprohibited". May be due to other status conditions. |
 
 Library codes: `RESPONSE` (empty response), `CREDENTIALS` (invalid response format from the account
-endpoint), `AVAILABILITY` (no domain names given), `TRANSFER_NOT_AVAILABLE`, `DOMAIN_RENEW`
-(renewal without expiration date), `ADD_ZONE`, `EDIT_ZONE`, `SET_ZONE`, `DELETE_ZONE` (unsupported
-record type or value not found), `SET_FORWARD` (unsupported forward type or empty address).
+endpoint), `AVAILABILITY` (no domain names given), `BALANCE` (currency not reported by the account),
+`TRANSFER_NOT_AVAILABLE`, `REGISTER_DOMAIN` / `TRANSFER_DOMAIN` / `RENEW_DOMAIN` (the gateway
+refused the operation), `DOMAIN_RENEW` (renewal without expiration date), `ADD_ZONE`, `EDIT_ZONE`,
+`SET_ZONE`, `DELETE_ZONE` (unsupported record type or value not found), `SET_FORWARD` (unsupported
+forward type or empty address), `CURL_<n>` (transport failure), `API_<status>` (HTTP error, with
+`GatewayCode` when the gateway sent its own code).
 
 ## License
 
