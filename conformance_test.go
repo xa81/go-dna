@@ -331,7 +331,7 @@ func call(c *Client, name string, a args) any {
 	case "disableTheftProtectionLock":
 		return c.DisableTheftProtectionLock(a.str(0, ""))
 	case "modifyPrivacyProtectionStatus":
-		return c.ModifyPrivacyProtectionStatus(a.str(0, ""), a.boolean(1, false), a.str(2, DefaultReason))
+		return c.ModifyPrivacyProtectionStatus(a.str(0, ""), a.any(1), a.str(2, DefaultReason))
 	case "renew":
 		return c.Renew(a.str(0, ""), a.num(1, 1))
 	case "registerWithContactInfo":
@@ -350,7 +350,8 @@ func call(c *Client, name string, a args) any {
 	case "modifyChildNameServer":
 		return c.ModifyChildNameServer(a.str(0, ""), a.str(1, ""), a.str(2, ""))
 	case "transfer":
-		return c.Transfer(a.str(0, ""), a.str(1, ""), a.num(2, 1), a.contacts(3))
+		// A 4th (contacts) argument is ignored: transfers never send contacts.
+		return c.Transfer(a.str(0, ""), a.str(1, ""), a.num(2, 1))
 	case "cancelTransfer":
 		return c.CancelTransfer(a.str(0, ""))
 	case "approveTransfer":
@@ -402,8 +403,8 @@ func TestConformance(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no fixtures found: %v", err)
 	}
-	if len(files) != 126 {
-		t.Errorf("found %d fixtures, want 126", len(files))
+	if len(files) != 134 {
+		t.Errorf("found %d fixtures, want 134", len(files))
 	}
 	calls := map[string]bool{}
 	for _, file := range files {

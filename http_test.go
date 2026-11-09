@@ -153,8 +153,8 @@ func TestTransportErrors(t *testing.T) {
 			t.Errorf("%v: transport failure must be an error, got %v", tc.err, res)
 			continue
 		}
-		if e["Code"] != "API_"+tc.errno {
-			t.Errorf("%v: code %v, want API_%s", tc.err, e["Code"], tc.errno)
+		if e["Code"] != "CURL_"+tc.errno {
+			t.Errorf("%v: code %v, want CURL_%s", tc.err, e["Code"], tc.errno)
 		}
 		if !strings.HasPrefix(e["Message"].(string), tc.msg) || e["Details"] != e["Message"] {
 			t.Errorf("%v: message %q / details %q", tc.err, e["Message"], e["Details"])
@@ -175,7 +175,7 @@ func TestRealTimeout(t *testing.T) {
 	c.httpClient = &http.Client{Timeout: 50 * time.Millisecond}
 	res := c.GetDetails("example.com")
 	e := res["error"].(map[string]any)
-	if e["Code"] != "API_28" || !strings.HasPrefix(e["Message"].(string), "Could not reach the DomainNameAPI service") {
+	if e["Code"] != "CURL_28" || !strings.HasPrefix(e["Message"].(string), "Could not reach the DomainNameAPI service") {
 		t.Fatalf("got %v", res)
 	}
 }
@@ -189,12 +189,20 @@ func TestSSLVerificationToggle(t *testing.T) {
 	c.SetErrorReportingEnabled(false)
 	c.SetServiceURL(srv.URL + "/api/v1")
 	res := c.GetResellerDetails()
-	if res["result"] != ResultError || res["error"].(map[string]any)["Code"] != "API_60" {
+	if res["result"] != ResultError || res["error"].(map[string]any)["Code"] != "CURL_60" {
 		t.Fatalf("self-signed certificate must fail with verification on, got %v", res)
 	}
 	c.SetSSLVerification(false)
 	if res := c.GetResellerDetails(); res["result"] != ResultOK {
 		t.Fatalf("verification off must accept the certificate, got %v", res)
+	}
+	// After a transport failure, the next HTTP error is API_<status> again.
+	c2, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) })
+	c2.httpClient = errDoer{context.DeadlineExceeded}
+	c2.GetDetails("example.com")
+	c2.httpClient = &http.Client{}
+	if e := c2.GetDetails("example.com")["error"].(map[string]any); e["Code"] != "API_500" {
+		t.Errorf("code after recovery = %v, want API_500", e["Code"])
 	}
 }
 

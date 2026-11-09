@@ -96,7 +96,9 @@ func TestNormalizePhone(t *testing.T) {
 		{"905323743388", "90", "5323743388", "90"},
 		{"0090 212 123 45 67", "", "2121234567", "90"},
 		{"+1 (202) 555-0100", "1", "2025550100", "1"},
-		{"+1 (202) 555-0100", "90", "12025550100", "90"},
+		{"+1 (202) 555-0100", "90", "2025550100", "1"},
+		{"+44 20 7946 0958", "90", "2079460958", "44"},
+		{"+358 40 123 4567", "", "401234567", "358"},
 		{"", "44", "", "44"},
 		{"0", "", "0", "90"},
 	}
@@ -104,6 +106,24 @@ func TestNormalizePhone(t *testing.T) {
 		n, cc := normalizePhone(tc.number, tc.cc)
 		if n != tc.wantN || cc != tc.wantCC {
 			t.Errorf("normalizePhone(%q, %q) = %q, %q; want %q, %q", tc.number, tc.cc, n, cc, tc.wantN, tc.wantCC)
+		}
+	}
+}
+
+func TestCallingCodePrefix(t *testing.T) {
+	cases := map[string]string{"12025550100": "1", "79161234567": "7", "905321112233": "90", "358401234567": "358", "0123": "", "": "", "35": ""}
+	for in, want := range cases {
+		if got := callingCodePrefix(in); got != want {
+			t.Errorf("callingCodePrefix(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParseBoolFlag(t *testing.T) {
+	cases := map[any]bool{true: true, false: false, 1: true, 0: false, 2: false, "1": true, " On ": true, "TRUE": true, "yes": true, "off": false, "": false, nil: false}
+	for in, want := range cases {
+		if got := parseBoolFlag(in); got != want {
+			t.Errorf("parseBoolFlag(%#v) = %v, want %v", in, got, want)
 		}
 	}
 }

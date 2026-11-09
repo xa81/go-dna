@@ -1,6 +1,7 @@
 package dna
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,7 +12,7 @@ import (
 //	{"result": "OK", "id": "<uuid>", "active": true, "name": "...",
 //	 "balance": "601.64", "currency": "USD", "symbol": "$",
 //	 "balances": [{"balance": "601.64", "currency": "USD", "symbol": "$"},
-//	              {"balance": "1250.5", "currency": "TL", "symbol": "TL"}]}
+//	              {"balance": "1250.50", "currency": "TL", "symbol": "TL"}]}
 func (c *Client) GetResellerDetails() map[string]any {
 	response, err := c.request("GET", "deposit/accounts/me", nil)
 	if err != nil {
@@ -20,11 +21,11 @@ func (c *Client) GetResellerDetails() map[string]any {
 	if dig(response, "resellerId") == nil {
 		return map[string]any{
 			"result": ResultError,
-			"error":  setError("CREDENTIALS", "Invalid response format", "Response does not contain required fields"),
+			"error":  c.setError("CREDENTIALS", "Invalid response format", "Response does not contain required fields"),
 		}
 	}
-	usd := phpString(coalesce(dig(response, "usdBalance"), int64(0)))
-	try := phpString(coalesce(dig(response, "tryBalance"), int64(0)))
+	usd := numberFormat(phpFloat(coalesce(dig(response, "usdBalance"), int64(0))), 2)
+	try := numberFormat(phpFloat(coalesce(dig(response, "tryBalance"), int64(0))), 2)
 	return map[string]any{
 		"result":   ResultOK,
 		"id":       dig(response, "resellerId"),
@@ -54,8 +55,10 @@ var currencyMap = map[string]currencyInfo{
 }
 
 // GetCurrentBalance returns the balance in one currency (USD, TRY, EUR,
-// GBP). An empty currency means "USD", php-dna's default. It uses the
-// legacy OperationResult envelope, also on failure:
+// GBP). An empty currency means "USD", php-dna's default. The account only
+// reports USD and TRY: other currencies return OperationResult "FAILED" with
+// ErrorCode "BALANCE". It uses the legacy OperationResult envelope, also on
+// failure:
 //
 //	{"ErrorCode": 0, "OperationMessage": "Command completed succesfully.",
 //	 "OperationResult": "SUCCESS", "Balance": "601.64", "CurrencyId": 2,
@@ -72,7 +75,7 @@ func (c *Client) GetCurrentBalance(currency string) map[string]any {
 	response, err := c.request("GET", "deposit/accounts/me", params{{"currency", name}})
 	if err != nil {
 		return map[string]any{
-			"ErrorCode":        formatErrorCode(err.code),
+			"ErrorCode":        c.formatErrorCode(err.code),
 			"OperationMessage": err.message,
 			"OperationResult":  "FAILED",
 			"Balance":          "0.00",
@@ -83,6 +86,20 @@ func (c *Client) GetCurrentBalance(currency string) map[string]any {
 		}
 	}
 	balanceKey := asciiLower(currency) + "Balance"
+	if m, ok := response.(map[string]any); !ok || !hasKey(m, balanceKey) {
+		// The account only reports USD and TRY balances; "0.00" for anything
+		// else looked like an empty account.
+		return map[string]any{
+			"ErrorCode":        "BALANCE",
+			"OperationMessage": fmt.Sprintf("No %s balance is reported for this account. Available: USD, TRY.", name),
+			"OperationResult":  "FAILED",
+			"Balance":          "0.00",
+			"CurrencyId":       mapped.id,
+			"CurrencyInfo":     nil,
+			"CurrencyName":     mapped.name,
+			"CurrencySymbol":   mapped.symbol,
+		}
+	}
 	return map[string]any{
 		"ErrorCode":        int64(0),
 		"OperationMessage": "Command completed succesfully.",
@@ -117,7 +134,7 @@ func (c *Client) CheckAvailability(domains, extensions []string, period int, com
 	if len(queries) == 0 {
 		return map[string]any{
 			"result": ResultError,
-			"error":  setError("AVAILABILITY", "Domain names not found.", "No domain names provided for availability check"),
+			"error":  c.setError("AVAILABILITY", "Domain names not found.", "No domain names provided for availability check"),
 		}
 	}
 	response, err := c.request("POST", "domains/bulk-search", queries)
@@ -138,7 +155,11 @@ func (c *Client) CheckAvailability(domains, extensions []string, period int, com
 		} else if i := strings.LastIndexByte(domainRaw, '.'); i >= 0 {
 			tld = asciiLower(domainRaw[i+1:])
 		}
-		domainName := strings.ReplaceAll(asciiLower(domainRaw), "."+tld, "")
+		// Strip only the trailing ".tld" ("my.company.com" stays "my.company").
+		domainName := asciiLower(domainRaw)
+		if suffix := "." + tld; tld != "" && strings.HasSuffix(domainName, suffix) {
+			domainName = domainName[:len(domainName)-len(suffix)]
+		}
 		status := asciiLower(phpString(coalesce(dig(item, "status"), "")))
 		available := status == "available" || status == "1" || status == "true"
 
@@ -268,6 +289,11 @@ func (c *Client) GetList(extra map[string]any) map[string]any {
 		"result":     ResultOK,
 		"TotalCount": phpInt(coalesce(dig(response, "totalCount"), int64(0))),
 	}
+}
+
+func hasKey(m map[string]any, k string) bool {
+	_, ok := m[k]
+	return ok
 }
 
 // boolString is php-dna's `!empty($x) ? 'true' : 'false'`.

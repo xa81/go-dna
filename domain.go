@@ -79,7 +79,7 @@ func parseContactIDs(contacts any) map[string]any {
 // empty response is the RESPONSE error.
 func (c *Client) parseDomainInfo(data any) map[string]any {
 	if phpEmpty(data) {
-		return map[string]any{"result": ResultError, "error": setError("RESPONSE", "", "")}
+		return map[string]any{"result": ResultError, "error": c.setError("RESPONSE", "", "")}
 	}
 	var remaining int64
 	if rd := dig(data, "remainingDay"); rd != nil {
@@ -164,7 +164,7 @@ func (c *Client) SyncFromRegistry(domainName string) map[string]any {
 // ModifyNameServer replaces the nameservers of a domain. nameServers is a
 // []string (or any list), or a map whose values are taken in key order.
 // Entries are trimmed, lower-cased and de-duplicated before sending; the
-// result echoes the gateway's list, or the input as given.
+// result echoes the gateway's list, or the normalized list that was sent.
 func (c *Client) ModifyNameServer(domainName string, nameServers any) map[string]any {
 	payload := map[string]any{"domainName": domainName, "nameServers": normalizeHostNameList(nameServers)}
 	response, err := c.request("PUT", "domains/dns/name-server", payload)
@@ -173,7 +173,7 @@ func (c *Client) ModifyNameServer(domainName string, nameServers any) map[string
 	}
 	return map[string]any{
 		"result": ResultOK,
-		"data":   map[string]any{"NameServers": coalesce(dig(response, "nameServers"), nameServers)},
+		"data":   map[string]any{"NameServers": coalesce(dig(response, "nameServers"), payload["nameServers"])},
 	}
 }
 
@@ -260,10 +260,19 @@ func (c *Client) ModifyChildNameServer(domainName, nameServer, ipAddress string)
 	}
 }
 
-var contactKeyFromAPI = map[string]string{"Admin": "Administrative", "Billing": "Billing", "Tech": "Technical", "Registrant": "Registrant"}
+// contactKeyFromAPI maps gateway contact types (case-insensitive) to
+// php-dna's contact keys.
+var contactKeyFromAPI = map[string]string{
+	"admin": "Administrative", "administrative": "Administrative",
+	"billing": "Billing",
+	"tech":    "Technical", "technical": "Technical",
+	"registrant": "Registrant", "owner": "Registrant",
+}
 
-// GetContacts returns the four contacts of a domain, keyed Administrative,
-// Billing, Registrant, Technical:
+// GetContacts returns the contacts of a domain, keyed Administrative,
+// Billing, Registrant, Technical. Gateway types are matched
+// case-insensitively (admin, tech, owner, ...); unknown types are kept under
+// their own capitalized name:
 //
 //	{"result": "OK", "data": {"contacts": {"Administrative": {"ID": "...",
 //	 "Status": "Active", "FirstName": "...", "LastName": "...", "Company": "...",
@@ -277,10 +286,16 @@ func (c *Client) GetContacts(domainName string) map[string]any {
 	contacts := map[string]any{}
 	if list := dig(info, "contacts"); isArray(list) {
 		for _, item := range phpValues(list) {
-			apiType := phpString(coalesce(dig(item, "contactType"), ""))
-			key, ok := contactKeyFromAPI[apiType]
+			if !isArray(item) {
+				continue
+			}
+			apiType := phpTrim(phpString(coalesce(dig(item, "contactType"), "")))
+			key, ok := contactKeyFromAPI[asciiLower(apiType)]
 			if !ok {
 				key = ucfirst(asciiLower(apiType))
+			}
+			if key == "" {
+				continue
 			}
 			merged := map[string]any{}
 			if m, ok := item.(map[string]any); ok {
@@ -292,13 +307,7 @@ func (c *Client) GetContacts(domainName string) map[string]any {
 			contacts[key] = parseContactInfo(merged)
 		}
 	}
-	ordered := map[string]any{}
-	for _, k := range []string{"Administrative", "Billing", "Registrant", "Technical"} {
-		if v, ok := contacts[k]; ok && v != nil {
-			ordered[k] = v
-		}
-	}
-	return map[string]any{"data": map[string]any{"contacts": ordered}, "result": ResultOK}
+	return map[string]any{"data": map[string]any{"contacts": contacts}, "result": ResultOK}
 }
 
 // SaveContacts updates the contacts of a domain. Half-empty contacts are
@@ -318,13 +327,11 @@ func (c *Client) SaveContacts(domainName string, contacts Contacts) map[string]a
 	return map[string]any{"result": ResultOK, "data": map[string]any{"contacts": parsed}}
 }
 
-// Transfer starts an incoming transfer with the EPP/auth code.
-//
-// Like php-dna's facade (4.0.4), the contacts argument is accepted but not
-// forwarded: the request always carries an empty contact list. It is part of
-// the signature so the call shape matches php-dna's DNARest::transfer().
-func (c *Client) Transfer(domainName, eppCode string, period int, contacts Contacts) map[string]any {
-	_ = contacts
+// Transfer starts an incoming transfer with the EPP/auth code. Contacts are
+// never sent: the registrar takes them over with the domain, so the request
+// always carries an empty contact list. Returns the domain array (as
+// GetDetails); a gateway refusal (success:false) is a TRANSFER_DOMAIN error.
+func (c *Client) Transfer(domainName, eppCode string, period int) map[string]any {
 	payload := map[string]any{
 		"domainName": domainName,
 		"authCode":   eppCode,
@@ -334,6 +341,9 @@ func (c *Client) Transfer(domainName, eppCode string, period int, contacts Conta
 	response, err := c.request("POST", "domains/transfer", payload)
 	if err != nil {
 		return c.errorEnvelope(err)
+	}
+	if failed := c.operationFailure(response, "TRANSFER_DOMAIN"); failed != nil {
+		return failed
 	}
 	return c.parseDomainInfo(response)
 }
@@ -399,7 +409,7 @@ func (c *Client) CheckTransfer(domainName, authCode string) map[string]any {
 		},
 	}
 	if !available {
-		envelope["error"] = setError(
+		envelope["error"] = c.setError(
 			"TRANSFER_NOT_AVAILABLE",
 			coalesce(dig(response, "message"), "Domain is not transferable"),
 			coalesce(dig(response, "messageKey"), dig(response, "message"), ""),
@@ -410,16 +420,20 @@ func (c *Client) CheckTransfer(domainName, authCode string) map[string]any {
 
 // Renew renews a domain for period years:
 // {"result": "OK", "data": {"ExpirationDate": "2027-11-09T12:00:00"}}.
+// A gateway refusal (success:false) is a RENEW_DOMAIN error.
 func (c *Client) Renew(domainName string, period int) map[string]any {
 	response, err := c.request("POST", "domains/renew", map[string]any{"domainName": domainName, "period": int64(period)})
 	if err != nil {
 		return c.errorEnvelope(err)
 	}
+	if failed := c.operationFailure(response, "RENEW_DOMAIN"); failed != nil {
+		return failed
+	}
 	if exp := dig(response, "expirationDate"); phpBool(exp) {
 		return map[string]any{"result": ResultOK, "data": map[string]any{"ExpirationDate": formatAPIDate(exp)}}
 	}
 	c.reportError(&apiError{message: "[DOMAIN_RENEW] " + defaultErrors["DOMAIN_RENEW"].description})
-	return map[string]any{"result": ResultError, "error": setError("DOMAIN_RENEW", "", "")}
+	return map[string]any{"result": ResultError, "error": c.setError("DOMAIN_RENEW", "", "")}
 }
 
 // RegisterOptions holds RegisterWithContactInfo's optional arguments. A nil
@@ -446,7 +460,8 @@ func DefaultRegisterOptions() *RegisterOptions {
 
 // RegisterWithContactInfo registers a domain for period years with the
 // given contacts. opts may be nil (php-dna's defaults). Returns the domain
-// array (as GetDetails) on success.
+// array (as GetDetails) on success; a gateway refusal (success:false) is a
+// REGISTER_DOMAIN error.
 func (c *Client) RegisterWithContactInfo(domainName string, period int, contacts Contacts, opts *RegisterOptions) map[string]any {
 	if opts == nil {
 		opts = DefaultRegisterOptions()
@@ -480,20 +495,56 @@ func (c *Client) RegisterWithContactInfo(domainName string, period int, contacts
 	if err != nil {
 		return c.errorEnvelope(err)
 	}
+	if failed := c.operationFailure(response, "REGISTER_DOMAIN"); failed != nil {
+		return failed
+	}
 	return c.parseDomainInfo(response)
 }
 
 // ModifyPrivacyProtectionStatus turns WHOIS privacy protection on or off.
-// reason is informational (empty means "Owner request").
-func (c *Client) ModifyPrivacyProtectionStatus(domainName string, status bool, reason string) map[string]any {
-	if reason == "" {
-		reason = DefaultReason
-	}
+// status is a bool, or a value panels store: true, 1, "1", "true", "on" and
+// "yes" (any case) enable it, everything else disables it. reason is kept
+// for php-dna signature compatibility only and is not sent (the gateway has
+// no such field).
+func (c *Client) ModifyPrivacyProtectionStatus(domainName string, status any, reason string) map[string]any {
 	_ = reason
-	if _, err := c.request("POST", "domains/privacy", map[string]any{"domainName": domainName, "privacyStatus": status}); err != nil {
+	enabled := parseBoolFlag(status)
+	if _, err := c.request("POST", "domains/privacy", map[string]any{"domainName": domainName, "privacyStatus": enabled}); err != nil {
 		return c.errorEnvelope(err)
 	}
-	return map[string]any{"data": map[string]any{"PrivacyProtectionStatus": status}, "result": ResultOK}
+	return map[string]any{"data": map[string]any{"PrivacyProtectionStatus": enabled}, "result": ResultOK}
+}
+
+// parseBoolFlag mirrors filter_var($v, FILTER_VALIDATE_BOOLEAN) for a
+// non-bool value; bools pass through.
+func parseBoolFlag(v any) bool {
+	v = normalizeInput(v)
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	switch asciiLower(phpTrim(phpString(v))) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
+}
+
+// operationFailure turns an HTTP 200 {"success": false, "message": ...}
+// answer of the register, transfer and renew endpoints into an error
+// envelope; nil when the operation succeeded.
+func (c *Client) operationFailure(response any, code string) map[string]any {
+	m, ok := response.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if s, ok := m["success"].(bool); !ok || s {
+		return nil
+	}
+	message := phpTrim(phpString(m["message"]))
+	if message == "" {
+		message = "The registry did not accept the request."
+	}
+	return map[string]any{"result": ResultError, "error": c.setError(code, message, message)}
 }
 
 // IsTrTLD reports whether the domain ends with ".tr" (case-insensitive).

@@ -43,6 +43,7 @@ var DefaultIgnoredErrors = []string{
 	"Invalid API credentials",
 	"could not be found",
 	"Insufficent reseller balance",
+	"Redirect information not found",
 }
 
 // flattenValidationErrors turns the gateway's validationErrors list into one

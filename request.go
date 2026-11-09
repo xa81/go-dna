@@ -60,13 +60,19 @@ func httpStatusReason(status int) string {
 	return "Unexpected Response"
 }
 
-// formatErrorCode formats a numeric error code as API_<code>.
-func formatErrorCode(code int) string { return "API_" + strconv.Itoa(code) }
+// formatErrorCode formats a numeric error code: CURL_<errno> after a
+// transport failure, API_<status> otherwise.
+func (c *Client) formatErrorCode(code int) string {
+	if c.transportFailed {
+		return "CURL_" + strconv.Itoa(code)
+	}
+	return "API_" + strconv.Itoa(code)
+}
 
 // setError builds the {Code, Message, Details} error array. For the codes
 // php-dna predefines, the generic texts are used only when no message or
 // details were given.
-func setError(code any, message, details any) map[string]any {
+func baseSetError(code any, message, details any) map[string]any {
 	if k, ok := code.(string); ok {
 		if def, ok := defaultErrors[k]; ok {
 			msg := message
@@ -83,18 +89,30 @@ func setError(code any, message, details any) map[string]any {
 	return map[string]any{"Code": code, "Message": message, "Details": details}
 }
 
+// setError is baseSetError plus the gateway's own error code (GatewayCode)
+// next to an API_<status> code, when the last failed request carried one.
+func (c *Client) setError(code any, message, details any) map[string]any {
+	res := baseSetError(code, message, details)
+	if s, ok := res["Code"].(string); ok && apiStatusCodeRe.MatchString(s) && c.lastGatewayCode != "" {
+		res["GatewayCode"] = c.lastGatewayCode
+	}
+	return res
+}
+
+var apiStatusCodeRe = regexp.MustCompile(`^API_\d+$`)
+
 // errorEnvelope is the shared catch block of every php-dna method:
 // {result: ERROR, error: {Code: API_<status>, Message, Details}}.
 func (c *Client) errorEnvelope(e *apiError) map[string]any {
 	details := coalesce(dig(c.lastParsedResponse, "Details"), dig(c.lastResponse, "raw_response"), e.message)
 	return map[string]any{
 		"result": ResultError,
-		"error":  setError(formatErrorCode(e.code), e.message, details),
+		"error":  c.setError(c.formatErrorCode(e.code), e.message, details),
 	}
 }
 
-func errorResult(code, message string) map[string]any {
-	return map[string]any{"result": ResultError, "error": setError(code, message, message)}
+func (c *Client) errorResult(code, message string) map[string]any {
+	return map[string]any{"result": ResultError, "error": c.setError(code, message, message)}
 }
 
 // paceZoneRequest keeps consecutive domains/zones* calls at least
@@ -137,6 +155,8 @@ var dnaPrefixRe = regexp.MustCompile(`^Dna\s+`)
 // then in lastParsedResponse.
 func (c *Client) request(method, endpoint string, data any) (any, *apiError) {
 	c.paceZoneRequest(endpoint)
+	c.transportFailed = false
+	c.lastGatewayCode = ""
 	c.startAt = c.now()
 
 	opName := endpoint
@@ -194,11 +214,12 @@ func (c *Client) request(method, endpoint string, data any) (any, *apiError) {
 		// Transport failure (timeout, DNS, TLS, reset): an error, never an
 		// empty success.
 		errno := transportErrno(err)
+		c.transportFailed = true
 		msg := "Curl error during request: " + err.Error()
 		if errno == 28 {
 			msg = "Could not reach the DomainNameAPI service: the connection timed out. (" + err.Error() + ")"
 		}
-		c.lastParsedResponse = setError("CURL_"+strconv.Itoa(errno), msg, msg)
+		c.lastParsedResponse = c.setError("CURL_"+strconv.Itoa(errno), msg, msg)
 		e := &apiError{message: msg, code: errno}
 		c.reportError(e)
 		return nil, e
@@ -225,7 +246,13 @@ func (c *Client) request(method, endpoint string, data any) (any, *apiError) {
 
 	errorMessage := coalesce(dig(parsed, "message"), dig(parsed, "error", "message"), respBody)
 	errorCode := coalesce(dig(parsed, "code"), dig(parsed, "error", "code"), "HTTP_"+strconv.Itoa(status))
-	errorDetails := coalesce(dig(parsed, "details"), dig(parsed, "error", "details"), respBody)
+	apiDetails := coalesce(dig(parsed, "details"), dig(parsed, "error", "details"))
+	errorDetails := coalesce(apiDetails, respBody)
+	// The gateway's own code (e.g. Dna.DomainService:Domain:10007) is kept as
+	// GatewayCode next to the API_<status> code.
+	if s, ok := errorCode.(string); ok && s != "" && !strings.HasPrefix(s, "HTTP_") && s != "CREDENTIALS" {
+		c.lastGatewayCode = s
+	}
 
 	if phpTrim(phpString(errorMessage)) == "" {
 		errorMessage = "HTTP " + strconv.Itoa(status) + " - " + httpStatusReason(status)
@@ -239,7 +266,9 @@ func (c *Client) request(method, endpoint string, data any) (any, *apiError) {
 	msgStr := phpString(errorMessage)
 	codeStr := phpString(errorCode)
 	if boilerplateRe.MatchString(msgStr) || msgStr == codeStr {
-		detailsClean := phpTrim(dnaPrefixRe.ReplaceAllString(phpString(errorDetails), ""))
+		// Only the gateway's details field may replace the message; the raw
+		// response body is never user-facing text.
+		detailsClean := phpTrim(dnaPrefixRe.ReplaceAllString(phpString(apiDetails), ""))
 		if detailsClean != "" && detailsClean != msgStr && detailsClean != codeStr && !boilerplateRe.MatchString(detailsClean) {
 			errorMessage = detailsClean
 		} else {
@@ -254,7 +283,7 @@ func (c *Client) request(method, endpoint string, data any) (any, *apiError) {
 		}
 	}
 
-	c.lastParsedResponse = setError(errorCode, errorMessage, errorDetails)
+	c.lastParsedResponse = c.setError(errorCode, errorMessage, errorDetails)
 	e := &apiError{message: phpString(errorMessage), code: status}
 	c.reportError(e)
 	return nil, e

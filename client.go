@@ -98,6 +98,9 @@ type Client struct {
 	lastFunction        string
 	startAt             time.Time
 
+	transportFailed bool   // the last request failed in transport, not with an HTTP status
+	lastGatewayCode string // the gateway's own error code from the last failed request
+
 	zoneMinInterval   time.Duration
 	lastZoneRequestAt time.Time
 	sleep             func(time.Duration)

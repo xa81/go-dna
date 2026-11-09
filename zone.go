@@ -137,23 +137,28 @@ func (c *Client) GetResourceRecords(domainName string) map[string]any {
 // list ([]string). name may be "@", the apex, a relative label or an FQDN.
 // ttl is clamped to 1..86400 (below 1 means 3600); php-dna's default is
 // 3600. With apply the change is committed at once (php-dna's default:
-// true). Note: the gateway replaces the whole name+type on every write; use
+// true); a failed apply is returned as the error. The result reports the
+// upper-cased type and the clamped TTL that were sent. Note: the gateway replaces the whole name+type on every write; use
 // AddResourceRecordValue to append one value.
 func (c *Client) AddResourceRecord(domainName, name, recordType string, content any, ttl int, apply bool) map[string]any {
 	if why := unsupportedZoneType(recordType); why != "" {
-		return errorResult("ADD_ZONE", why)
+		return c.errorResult("ADD_ZONE", why)
 	}
 	name = relativizeRecordName(name, domainName)
-	body := map[string]any{"zoneStruct": buildZoneStruct(name, recordType, content, ttl)}
+	zs := buildZoneStruct(name, recordType, content, ttl)
+	body := map[string]any{"zoneStruct": zs}
 	if _, err := c.request("POST", zoneEndpoint("domains/zones", params{{"domainName", domainName}}), body); err != nil {
 		return c.errorEnvelope(err)
 	}
 	if apply {
-		c.ApplyResourceRecords(domainName)
+		// A failed apply leaves the change staged but not live: report it.
+		if applied := c.ApplyResourceRecords(domainName); applied["result"] != ResultOK {
+			return applied
+		}
 	}
 	return map[string]any{
 		"result": ResultOK,
-		"data":   map[string]any{"Name": name, "Type": recordType, "TTL": int64(ttl), "Content": content},
+		"data":   map[string]any{"Name": name, "Type": zs["type"], "TTL": zs["ttl"], "Content": content},
 	}
 }
 
@@ -161,20 +166,24 @@ func (c *Client) AddResourceRecord(domainName, name, recordType string, content 
 // and apply as in AddResourceRecord.
 func (c *Client) EditResourceRecord(domainName, recordName, name, recordType string, content any, ttl int, apply bool) map[string]any {
 	if why := unsupportedZoneType(recordType); why != "" {
-		return errorResult("EDIT_ZONE", why)
+		return c.errorResult("EDIT_ZONE", why)
 	}
 	name = relativizeRecordName(name, domainName)
-	body := map[string]any{"zoneStruct": buildZoneStruct(name, recordType, content, ttl)}
+	zs := buildZoneStruct(name, recordType, content, ttl)
+	body := map[string]any{"zoneStruct": zs}
 	endpoint := zoneEndpoint("domains/zones", params{{"domainName", domainName}, {"recordName", recordName}})
 	if _, err := c.request("PUT", endpoint, body); err != nil {
 		return c.errorEnvelope(err)
 	}
 	if apply {
-		c.ApplyResourceRecords(domainName)
+		// A failed apply leaves the change staged but not live: report it.
+		if applied := c.ApplyResourceRecords(domainName); applied["result"] != ResultOK {
+			return applied
+		}
 	}
 	return map[string]any{
 		"result": ResultOK,
-		"data":   map[string]any{"Name": name, "Type": recordType, "TTL": int64(ttl), "Content": content},
+		"data":   map[string]any{"Name": name, "Type": zs["type"], "TTL": zs["ttl"], "Content": content},
 	}
 }
 
@@ -187,7 +196,10 @@ func (c *Client) DeleteResourceRecord(domainName, name, record, recordType strin
 		return c.errorEnvelope(err)
 	}
 	if apply {
-		c.ApplyResourceRecords(domainName)
+		// A failed apply leaves the change staged but not live: report it.
+		if applied := c.ApplyResourceRecords(domainName); applied["result"] != ResultOK {
+			return applied
+		}
 	}
 	return map[string]any{
 		"result": ResultOK,
@@ -212,7 +224,7 @@ func (c *Client) ApplyResourceRecords(domainName string) map[string]any {
 //	 "Contents": ["10 mx1.example.com", "20 mx2.example.com"]}}
 func (c *Client) SetResourceRecordSet(domainName, name, recordType string, contents []string, ttl int, apply bool) map[string]any {
 	if why := unsupportedZoneType(recordType); why != "" {
-		return errorResult("SET_ZONE", why)
+		return c.errorResult("SET_ZONE", why)
 	}
 	name = relativizeRecordName(name, domainName)
 	values := []any{}
@@ -224,16 +236,20 @@ func (c *Client) SetResourceRecordSet(domainName, name, recordType string, conte
 	if len(values) == 0 {
 		return c.DeleteResourceRecordSet(domainName, name, recordType, apply, "")
 	}
-	body := map[string]any{"zoneStruct": buildZoneStruct(name, recordType, values, ttl)}
+	zs := buildZoneStruct(name, recordType, values, ttl)
+	body := map[string]any{"zoneStruct": zs}
 	if _, err := c.request("POST", zoneEndpoint("domains/zones", params{{"domainName", domainName}}), body); err != nil {
 		return c.errorEnvelope(err)
 	}
 	if apply {
-		c.ApplyResourceRecords(domainName)
+		// A failed apply leaves the change staged but not live: report it.
+		if applied := c.ApplyResourceRecords(domainName); applied["result"] != ResultOK {
+			return applied
+		}
 	}
 	return map[string]any{
 		"result": ResultOK,
-		"data":   map[string]any{"Name": name, "Type": asciiUpper(recordType), "TTL": int64(ttl), "Contents": values},
+		"data":   map[string]any{"Name": name, "Type": zs["type"], "TTL": zs["ttl"], "Contents": values},
 	}
 }
 
@@ -332,7 +348,7 @@ func stringsOf(values []any) []string {
 // returns "Changed": false. apply defaults to true in php-dna.
 func (c *Client) AddResourceRecordValue(domainName, name, recordType, value string, ttl *int, apply bool) map[string]any {
 	if why := unsupportedZoneType(recordType); why != "" {
-		return errorResult("ADD_ZONE", why)
+		return c.errorResult("ADD_ZONE", why)
 	}
 	name = relativizeRecordName(name, domainName)
 	set, errEnv := c.readResourceRecordSet(domainName, name, recordType)
@@ -356,7 +372,7 @@ func (c *Client) AddResourceRecordValue(domainName, name, recordType, value stri
 // value that is not there returns "Changed": false.
 func (c *Client) RemoveResourceRecordValue(domainName, name, recordType, value string, apply bool) map[string]any {
 	if why := unsupportedZoneType(recordType); why != "" {
-		return errorResult("DELETE_ZONE", why)
+		return c.errorResult("DELETE_ZONE", why)
 	}
 	name = relativizeRecordName(name, domainName)
 	set, errEnv := c.readResourceRecordSet(domainName, name, recordType)
@@ -389,7 +405,7 @@ func (c *Client) RemoveResourceRecordValue(domainName, name, recordType, value s
 // in the set is an EDIT_ZONE error.
 func (c *Client) ReplaceResourceRecordValue(domainName, name, recordType, oldValue, newValue string, ttl *int, apply bool) map[string]any {
 	if why := unsupportedZoneType(recordType); why != "" {
-		return errorResult("EDIT_ZONE", why)
+		return c.errorResult("EDIT_ZONE", why)
 	}
 	name = relativizeRecordName(name, domainName)
 	set, errEnv := c.readResourceRecordSet(domainName, name, recordType)
@@ -408,7 +424,7 @@ func (c *Client) ReplaceResourceRecordValue(domainName, name, recordType, oldVal
 	}
 	if !found {
 		why := fmt.Sprintf("No %s record \"%s\" with value \"%s\" to edit.", asciiUpper(recordType), name, oldValue)
-		return errorResult("EDIT_ZONE", why)
+		return c.errorResult("EDIT_ZONE", why)
 	}
 	return c.SetResourceRecordSet(domainName, name, recordType, contents, setTTL(ttl, set), apply)
 }

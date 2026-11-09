@@ -69,6 +69,56 @@ func TestErrorMapping(t *testing.T) {
 	}
 }
 
+func TestGatewayCode(t *testing.T) {
+	e := errorOf(t, 404, `{"error":{"code":"Dna.DomainService:Domain:10007","message":"Not found","details":"gone"}}`)
+	if e["GatewayCode"] != "Dna.DomainService:Domain:10007" {
+		t.Errorf("GatewayCode = %v", e["GatewayCode"])
+	}
+	for _, body := range []string{"", `{"message":"x"}`, `{"error":{"code":null,"message":"x"}}`} {
+		if e := errorOf(t, 400, body); e["GatewayCode"] != nil {
+			t.Errorf("body %q: unexpected GatewayCode %v", body, e["GatewayCode"])
+		}
+	}
+	if e := errorOf(t, 302, ""); e["GatewayCode"] != nil {
+		t.Errorf("credential redirect must not carry GatewayCode: %v", e)
+	}
+	// The message is never replaced by the raw body: code-only errors without
+	// details get the synthesised text.
+	e = errorOf(t, 400, `{"error":{"code":"X:1","message":"X:1","details":null}}`)
+	if e["Message"] != "The operation could not be completed by the registry (error: X:1). Please try again or contact support." {
+		t.Errorf("message = %v", e["Message"])
+	}
+}
+
+func TestOperationFailure(t *testing.T) {
+	cases := []struct {
+		call func(*Client) map[string]any
+		code string
+	}{
+		{func(c *Client) map[string]any { return c.Renew("example.com", 1) }, "RENEW_DOMAIN"},
+		{func(c *Client) map[string]any { return c.Transfer("example.com", "x", 1) }, "TRANSFER_DOMAIN"},
+		{func(c *Client) map[string]any { return c.RegisterWithContactInfo("example.com", 1, nil, nil) }, "REGISTER_DOMAIN"},
+	}
+	for _, tc := range cases {
+		for body, msg := range map[string]string{
+			`{"success":false,"message":"Not available"}`: "Not available",
+			`{"success":false,"message":"  "}`:            "The registry did not accept the request.",
+		} {
+			c := New("r", "k", false, WithHTTPClient(staticDoer{200, body}))
+			c.SetErrorReportingEnabled(false)
+			e, _ := tc.call(c)["error"].(map[string]any)
+			if e["Code"] != tc.code || e["Message"] != msg || e["Details"] != msg {
+				t.Errorf("%s %s: got %v", tc.code, body, e)
+			}
+		}
+	}
+	// "success": "false" (a string) is not a refusal.
+	c := New("r", "k", false, WithHTTPClient(staticDoer{200, `{"success":"false","expirationDate":"2027-01-01T00:00:00"}`}))
+	if res := c.Renew("example.com", 1); res["result"] != ResultOK {
+		t.Errorf("non-bool success must not fail, got %v", res)
+	}
+}
+
 func TestEmptySuccessIsResponseError(t *testing.T) {
 	for _, body := range []string{"", "null", "[]", "{}", "not json"} {
 		c := New("r", "k", false, WithHTTPClient(staticDoer{200, body}))
@@ -81,15 +131,15 @@ func TestEmptySuccessIsResponseError(t *testing.T) {
 }
 
 func TestSetErrorDefaults(t *testing.T) {
-	e := setError("CREDENTIALS", "", " ")
+	e := baseSetError("CREDENTIALS", "", " ")
 	if e["Message"] != "Invalid reseller ID or API key" || e["Details"] != "The provided API credentials are invalid" {
 		t.Errorf("predefined code must fall back to its texts, got %v", e)
 	}
-	e = setError("CREDENTIALS", "real", "server said")
+	e = baseSetError("CREDENTIALS", "real", "server said")
 	if e["Message"] != "real" || e["Details"] != "server said" {
 		t.Errorf("caller texts must win, got %v", e)
 	}
-	e = setError("OTHER", "", "")
+	e = baseSetError("OTHER", "", "")
 	if e["Code"] != "OTHER" || e["Message"] != "" || e["Details"] != "" {
 		t.Errorf("unknown code must be kept as is, got %v", e)
 	}

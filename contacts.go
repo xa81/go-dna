@@ -182,7 +182,6 @@ var contactDefaults = []kv{
 	{"LastName", "Isimyok"},
 	{"AddressLine1", "Addres yok"},
 	{"City", "ISTANBUL"},
-	{"State", "ISTANBUL"},
 	{"Country", "TR"},
 	{"ZipCode", "34000"},
 	{"Phone", "5555555555"},
@@ -200,6 +199,10 @@ func validateContact(in map[string]any) map[string]any {
 		if contact[d.k] == nil {
 			contact[d.k] = d.v
 		}
+	}
+	// No State default: a missing state falls back to the city below.
+	if contact["State"] == nil {
+		contact["State"] = ""
 	}
 
 	contact["FirstName"] = sanitizePersonName(phpString(contact["FirstName"]))
@@ -313,6 +316,11 @@ func normalizePhone(number, countryCode string) (string, string) {
 		}
 		if cc != "" && strings.HasPrefix(digits, cc) && len(digits) > len(cc) {
 			digits = digits[len(cc):]
+		} else if own := callingCodePrefix(digits); own != "" && len(digits) > len(own) {
+			// The number carries its own country code and it differs from the
+			// given one (often a default 90): the number wins.
+			cc = own
+			digits = digits[len(own):]
 		}
 	} else if cc != "" && strings.HasPrefix(digits, cc) && len(digits) > 10 {
 		digits = digits[len(cc):]
@@ -327,6 +335,34 @@ func normalizePhone(number, countryCode string) (string, string) {
 		digits = strings.TrimLeft(digits, "0")
 	}
 	return digits, cc
+}
+
+var twoDigitCallingCodes = map[string]bool{
+	"20": true, "27": true, "30": true, "31": true, "32": true, "33": true, "34": true, "36": true, "39": true,
+	"40": true, "41": true, "43": true, "44": true, "45": true, "46": true, "47": true, "48": true, "49": true,
+	"51": true, "52": true, "53": true, "54": true, "55": true, "56": true, "57": true, "58": true,
+	"60": true, "61": true, "62": true, "63": true, "64": true, "65": true, "66": true,
+	"81": true, "82": true, "84": true, "86": true, "90": true, "91": true, "92": true, "93": true,
+	"94": true, "95": true, "98": true,
+}
+
+// callingCodePrefix returns the country calling code at the start of an
+// international number (digits only). E.164 codes are prefix-free: zones 1
+// and 7 use one digit, the listed codes two, everything else three.
+func callingCodePrefix(digits string) string {
+	if digits == "" || digits[0] == '0' {
+		return ""
+	}
+	if digits[0] == '1' || digits[0] == '7' {
+		return digits[:1]
+	}
+	if len(digits) >= 2 && twoDigitCallingCodes[digits[:2]] {
+		return digits[:2]
+	}
+	if len(digits) >= 3 {
+		return digits[:3]
+	}
+	return ""
 }
 
 var countryNames = map[string]string{

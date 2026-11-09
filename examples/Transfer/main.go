@@ -18,7 +18,7 @@ func main() {
 
 	client := dna.New(resellerID, apiKey, false) // true = test (OTE) environment
 
-	result := client.Transfer("example.com", "ABC123XYZ456", 1, nil)
+	result := client.Transfer("example.com", "ABC123XYZ456", 1)
 	printJSON(result)
 	// {"result": "OK", "data": {"ID": 0, "Status": "Active", ...}}
 }
