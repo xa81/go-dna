@@ -10,6 +10,7 @@ package dna
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"math"
 	"reflect"
 	"regexp"
@@ -540,7 +541,7 @@ func decodeJSON(s string) any {
 	if err := dec.Decode(&v); err != nil {
 		return nil
 	}
-	if _, err := dec.Token(); err == nil {
+	if _, err := dec.Token(); err != io.EOF {
 		return nil // trailing data
 	}
 	return convertNumbers(v)
