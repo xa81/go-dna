@@ -117,9 +117,10 @@ Mislukte aanroepen veroorzaken nooit een panic; ze retourneren de foutenvelop:
 map[string]any{
 	"result": "ERROR",
 	"error": map[string]any{
-		"Code":    "API_404",      // API_<HTTP-status>, of een bibliotheekcode zoals RESPONSE
-		"Message": "The domain name you requested could not be found. Please check and try again.",
-		"Details": "The domain could not be found. Please check and try again.",
+		"Code":        "API_404", // API_<HTTP-status>, CURL_<n>, of een bibliotheekcode zoals RESPONSE
+		"Message":     "The domain name you requested could not be found. Please check and try again.",
+		"Details":     "The domain could not be found. Please check and try again.",
+		"GatewayCode": "Dna.DomainService:Domain:10007", // alleen bij API_<status>, wanneer de gateway een eigen code stuurde
 	},
 }
 ```
@@ -137,8 +138,8 @@ Drie methoden gebruiken een andere vorm, precies zoals in php-dna:
 Go kent geen standaardargumenten. De methoden behouden de parametervolgorde van php-dna en nemen
 elk argument expliciet aan; de standaardwaarde van php-dna staat in elke sectie hieronder vermeld.
 Voor het gemak selecteren enkele nulwaarden de standaardwaarde: `GetCurrentBalance("")` betekent USD,
-`GetTldList(0)` betekent 20, `CheckAvailability(..., "")` betekent `create`, `SetForwarding(..., "")`
-betekent `Standard` en `ModifyPrivacyProtectionStatus(..., "")` betekent `Owner request`.
+`GetTldList(0)` betekent 20, `CheckAvailability(..., "")` betekent `create` en
+`SetForwarding(..., "")` betekent `Standard`.
 `RegisterWithContactInfo` neemt zijn vier optionele argumenten aan in een `*RegisterOptions`
 (nil = standaardwaarden). `AddResourceRecordValue` en `ReplaceResourceRecordValue` nemen `ttl *int`
 aan: `nil` behoudt de huidige TTL van de set.
@@ -163,6 +164,8 @@ contacts = dna.ContactsFromMap(map[string]map[string]any{ /* rol => contact */ }
 ```
 
 Half ingevulde contacten worden vóór verzending aangevuld volgens de regels van `ValidateContact`.
+Contacten worden gebruikt door `RegisterWithContactInfo` en `SaveContacts`; bij transfers worden nooit
+contacten verzonden.
 
 ### Methodenamen
 
@@ -247,7 +250,8 @@ map[string]any{
 ```
 
 Het registratie-endpoint antwoordt met een beknopt record, waardoor de meeste velden leeg zijn; roep
-daarna `GetDetails` aan voor het volledige domein.
+daarna `GetDetails` aan voor het volledige domein. Wanneer de gateway de registratie weigert (HTTP 200
+met `"success": false`), is het resultaat een fout met code `REGISTER_DOMAIN` en de melding van de gateway.
 
 </details>
 
@@ -266,6 +270,9 @@ result := client.Renew("example.com", 1)
 map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03-15T10:00:00"}}
 ```
 
+Een weigering door de gateway (`"success": false`) retourneert code `RENEW_DOMAIN`; een succes zonder
+vervaldatum retourneert `DOMAIN_RENEW`.
+
 </details>
 
 <hr style="border: 4px solid #000; border-style: dashed;">
@@ -273,11 +280,13 @@ map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03
 ### Domeintransfer
 
 ```go
-result := client.Transfer("example.com", "Xy9#mK2$", 1, nil)
+result := client.Transfer("example.com", "Xy9#mK2$", 1)
 ```
 
-Net als in de facade van php-dna wordt het contactenargument niet doorgegeven: het transferverzoek
-bevat altijd een lege contactenlijst. Het resultaat heeft dezelfde vorm als `GetDetails`.
+Bij transfers worden nooit contacten verzonden: de registrar neemt ze samen met het domein over,
+dus het verzoek bevat altijd een lege contactenlijst en de methode heeft geen contactenparameter. Het
+resultaat heeft dezelfde vorm als `GetDetails`; een weigering door de gateway (`"success": false`)
+retourneert code `TRANSFER_DOMAIN` met de melding van de gateway.
 
 <details>
 <summary>Voorbeelduitvoer voor Domeintransfer</summary>
@@ -515,13 +524,13 @@ result := client.ModifyNameServer("example.com", []string{"ns1.example.com", "ns
 
 Een map wordt ook geaccepteerd (de waarden worden in sleutelvolgorde gebruikt). Vóór verzending
 worden de items ontdaan van spaties, naar kleine letters omgezet, van een afsluitende punt ontdaan
-en ontdubbeld.
+en ontdubbeld; het resultaat bevat die genormaliseerde lijst.
 
 <details>
 <summary>Voorbeelduitvoer voor Nameserver Wijzigen</summary>
 
 ```go
-map[string]any{"result": "OK", "data": map[string]any{"NameServers": []string{"ns1.example.com", "ns2.example.com"}}}
+map[string]any{"result": "OK", "data": map[string]any{"NameServers": []any{"ns1.example.com", "ns2.example.com"}}}
 ```
 
 </details>
@@ -619,6 +628,11 @@ map[string]any{"result": "OK", "data": map[string]any{"NameServer": "ns1.example
 result := client.ModifyPrivacyProtectionStatus("example.com", true, "Owner request")
 ```
 
+`status` is een bool of een waarde die panelen opslaan: `true`, `1`, `"1"`, `"true"`, `"on"` en
+`"yes"` schakelen privacy in, al het andere (`"off"`, `"0"`, `false`, ...) schakelt het uit. De reden
+wordt alleen behouden voor compatibiliteit met php-dna en wordt niet verzonden: de gateway kent zo'n
+veld niet.
+
 <details>
 <summary>Voorbeelduitvoer voor Domeinprivacy Wijzigen</summary>
 
@@ -635,6 +649,10 @@ map[string]any{"result": "OK", "data": map[string]any{"PrivacyProtectionStatus":
 ```go
 result := client.GetContacts("example.com")
 ```
+
+Contacttypen van de gateway worden hoofdletterongevoelig herkend (`Admin`/`Administrative`,
+`Tech`/`Technical`, `Registrant`/`Owner`, `Billing`); elk ander type wordt bewaard onder zijn eigen
+naam met een hoofdletter.
 
 <details>
 <summary>Voorbeelduitvoer voor Domeincontacten Ophalen</summary>
@@ -705,7 +723,7 @@ map[string]any{
 	"symbol":   "$",
 	"balances": []any{
 		map[string]any{"balance": "601.64", "currency": "USD", "symbol": "$"},
-		map[string]any{"balance": "1250.5", "currency": "TL", "symbol": "TL"},
+		map[string]any{"balance": "1250.50", "currency": "TL", "symbol": "TL"},
 	},
 }
 ```
@@ -736,8 +754,10 @@ map[string]any{
 }
 ```
 
-Bij een fout: `ErrorCode` is `API_<status>`, `OperationMessage` de foutmelding,
-`OperationResult` `"FAILED"` en `Balance` `"0.00"`.
+Bij een fout: `ErrorCode` is `API_<status>` (of `CURL_<n>`), `OperationMessage` de foutmelding,
+`OperationResult` `"FAILED"` en `Balance` `"0.00"`. Het account rapporteert alleen saldi in USD en TRY:
+voor elke andere valuta is het resultaat `FAILED` met `ErrorCode: "BALANCE"` en
+`No EUR balance is reported for this account. Available: USD, TRY.`
 
 </details>
 
@@ -750,9 +770,11 @@ vervangt de hele set. Recordnamen kunnen worden opgegeven als `@`, `""`, de zone
 label (`www`) of een volledige naam (`www.example.com`); ze worden teruggebracht tot het relatieve
 label dat de gateway verwacht. Ondersteunde typen: `A`, `AAAA`, `ALIAS`, `CAA`, `CNAME`, `DS`, `MX`,
 `NAPTR`, `PTR`, `SRV`, `TLSA`, `TXT` (andere worden geweigerd vóórdat er een aanroep plaatsvindt).
-De TTL wordt begrensd tot 1..86400. Met `apply = true` (de standaardwaarde van php-dna) worden
-wijzigingen direct doorgevoerd; opeenvolgende zone-aanroepen liggen minstens één seconde uit elkaar,
-omdat de gateway snelle reeksen verzoeken aan een rate limit onderwerpt.
+De TTL wordt begrensd tot 1..86400 en het resultaat vermeldt het type in hoofdletters en de TTL die
+daadwerkelijk zijn verzonden. Met `apply = true` (de standaardwaarde van php-dna) worden wijzigingen
+direct doorgevoerd; als die apply mislukt, wordt de foutenvelop daarvan geretourneerd (de wijziging
+blijft klaargezet). Opeenvolgende zone-aanroepen liggen minstens één seconde uit elkaar, omdat de
+gateway snelle reeksen verzoeken aan een rate limit onderwerpt.
 
 ```go
 // Lijst: één rij per waarde, namen volledig gekwalificeerd
@@ -826,14 +848,20 @@ client.DeleteForwarding("example.com")
 // SetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// GetForwarding (geen doorsturing ingesteld: Enabled false, toch OK)
+// GetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"Enabled": true, "RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// DeleteForwarding
-map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com"}}
+// GetForwarding wanneer er geen doorsturing is ingesteld
+map[string]any{"result": "OK", "data": map[string]any{"Enabled": false, "RedirectAddress": "", "ForwardType": ""}}
+
+// DeleteForwarding (Removed is false wanneer er niets was ingesteld)
+map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com", "Removed": true}}
 ```
 
 </details>
+
+Alleen het antwoord "Redirect information not found" van de gateway betekent "niet ingesteld"; elke
+andere fout, bijvoorbeeld een onbekend domein, wordt als fout geretourneerd.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -850,7 +878,9 @@ client.ValidateContact(map[string]any{"FirstName": " Jo ", "Phone": "+90 (532) 3
 
 `ValidateContact` vult ontbrekende velden aan met plaatsaanduidingen, verwijdert cijfers en
 leestekens uit namen, valt terug van State op City, zet gangbare landnamen om naar ISO-codes en
-splitst telefoon- en faxnummers op in nummer en landcode.
+splitst telefoon- en faxnummers op in nummer en landcode. Een nummer dat met een eigen
+internationaal voorvoegsel is geschreven (`+44 20 ...`, `0044 20 ...`) behoudt zijn eigen landcode,
+ook wanneer er een andere is opgegeven.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -871,16 +901,21 @@ Een `Client` houdt deze status per aanroep bij, dus deel één `Client` niet tus
 
 ## Foutafhandeling
 
-- Gatewayfouten retourneren `Code: "API_<HTTP status>"`. De melding komt van de gateway; een lege
-  foutbody wordt `HTTP 429 - Too Many Requests` (enzovoort), validatiefouten worden per veld vermeld
-  in `Details` (`Admin PostalCode - 'PostalCode' is required`), en standaardteksten van de backend
-  zoals `Exception of type '...' was thrown` worden vervangen door de bruikbare details.
+- Gatewayfouten retourneren `Code: "API_<HTTP status>"`. Wanneer de gateway een eigen foutcode stuurde
+  (bijvoorbeeld `Dna.DomainService:Domain:10007`), wordt die toegevoegd als `GatewayCode`, zodat
+  aanroepers "domein niet gevonden" kunnen onderscheiden van "TLD niet ondersteund". De melding komt
+  van de gateway; een lege foutbody wordt `HTTP 429 - Too Many Requests` (enzovoort),
+  validatiefouten worden per veld vermeld in `Details` (`Admin PostalCode - 'PostalCode' is required`),
+  en standaardteksten van de backend zoals `Exception of type '...' was thrown` worden vervangen door
+  de details van de gateway, of door een vaste melding met de foutcode — nooit door de ruwe responsbody.
 - Een 301/302-antwoord betekent dat de inloggegevens zijn geweigerd: `Message: "Invalid API credentials"`.
 - Transportfouten (time-out, DNS, TLS, verbinding verbroken) zijn fouten, nooit een leeg succes. Een
-  time-out retourneert `Code: "API_28"` en `Could not reach the DomainNameAPI service: the connection
-  timed out. (...)`; andere fouten gebruiken nummers in curl-stijl (`API_6` DNS, `API_7` verbinden,
-  `API_35` TLS, `API_56` verbinding verbroken, `API_60` certificaat) en `Curl error during request: ...`.
-  `GetParsedResponseData()["Code"]` bevat `CURL_<n>`.
+  time-out retourneert `Code: "CURL_28"` en `Could not reach the DomainNameAPI service: the connection
+  timed out. (...)`; andere fouten gebruiken nummers in curl-stijl (`CURL_6` DNS, `CURL_7` verbinden,
+  `CURL_35` TLS, `CURL_56` verbinding verbroken, `CURL_60` certificaat) en `Curl error during request: ...`.
+  `API_<n>` is gereserveerd voor HTTP-statussen.
+- Antwoorden op registratie, transfer en verlenging met HTTP 200 en `"success": false` zijn
+  weigeringen: `REGISTER_DOMAIN`, `TRANSFER_DOMAIN` of `RENEW_DOMAIN` met de melding van de gateway.
 - Een lege of `null` succesbody retourneert `Code: "RESPONSE"`.
 - Time-outs: 30 seconden per aanroep, 10 seconden voor het opzetten van de verbinding.
 
@@ -951,7 +986,7 @@ docker run --rm -v "$PWD":/src -w /src golang:1.23 go vet ./...
 ```
 
 De testsuite bevat unittests voor de HTTP-laag, foutmapping, telemetrie en hulpfuncties, en een
-conformiteitstest die alle 126 php-dna-fixtures uit `testdata/conformance` opnieuw afspeelt
+conformiteitstest die alle 134 php-dna-fixtures uit `testdata/conformance` opnieuw afspeelt
 (verzoeken over de lijn en retourwaarden moeten exact overeenkomen met php-dna). Geen enkele test
 maakt gebruik van het netwerk.
 
@@ -969,10 +1004,12 @@ maakt gebruik van het netwerk.
 | 2304 | Objectstatus verbiedt bewerking                | Domeinstatus is niet geschikt voor updates, vergrendeld voor updatebewerkingen. Status mag niet "clientupdateprohibited" zijn. Kan ook door andere statusvoorwaarden komen. |
 
 Bibliotheekcodes: `RESPONSE` (lege respons), `CREDENTIALS` (ongeldig responsformaat van het
-account-endpoint), `AVAILABILITY` (geen domeinnamen opgegeven), `TRANSFER_NOT_AVAILABLE`,
-`DOMAIN_RENEW` (verlenging zonder vervaldatum), `ADD_ZONE`, `EDIT_ZONE`, `SET_ZONE`, `DELETE_ZONE`
-(niet-ondersteund recordtype of waarde niet gevonden), `SET_FORWARD` (niet-ondersteund
-doorstuurtype of leeg adres).
+account-endpoint), `AVAILABILITY` (geen domeinnamen opgegeven), `BALANCE` (valuta niet door het
+account gerapporteerd), `TRANSFER_NOT_AVAILABLE`, `REGISTER_DOMAIN` / `TRANSFER_DOMAIN` /
+`RENEW_DOMAIN` (de gateway heeft de bewerking geweigerd), `DOMAIN_RENEW` (verlenging zonder
+vervaldatum), `ADD_ZONE`, `EDIT_ZONE`, `SET_ZONE`, `DELETE_ZONE` (niet-ondersteund recordtype of
+waarde niet gevonden), `SET_FORWARD` (niet-ondersteund doorstuurtype of leeg adres), `CURL_<n>`
+(transportfout), `API_<status>` (HTTP-fout, met `GatewayCode` wanneer de gateway een eigen code stuurde).
 
 ## Licentie
 

@@ -117,9 +117,10 @@ Fehlgeschlagene Aufrufe lösen nie eine Panic aus; sie liefern den Fehler-Umschl
 map[string]any{
 	"result": "ERROR",
 	"error": map[string]any{
-		"Code":    "API_404",      // API_<HTTP-Status> oder ein Bibliothekscode wie RESPONSE
-		"Message": "The domain name you requested could not be found. Please check and try again.",
-		"Details": "The domain could not be found. Please check and try again.",
+		"Code":        "API_404", // API_<HTTP-Status>, CURL_<n> oder ein Bibliothekscode wie RESPONSE
+		"Message":     "The domain name you requested could not be found. Please check and try again.",
+		"Details":     "The domain could not be found. Please check and try again.",
+		"GatewayCode": "Dna.DomainService:Domain:10007", // nur bei API_<status>, wenn das Gateway einen eigenen Code gesendet hat
 	},
 }
 ```
@@ -137,9 +138,8 @@ Drei Methoden verwenden – genau wie in php-dna – eine andere Struktur:
 Go kennt keine Standardargumente. Die Methoden behalten die Parameterreihenfolge von php-dna bei und
 erwarten jedes Argument explizit; der Standardwert von php-dna ist in jedem der folgenden Abschnitte
 angegeben. Der Einfachheit halber wählen einige Nullwerte den Standard: `GetCurrentBalance("")`
-bedeutet USD, `GetTldList(0)` bedeutet 20, `CheckAvailability(..., "")` bedeutet `create`,
-`SetForwarding(..., "")` bedeutet `Standard` und `ModifyPrivacyProtectionStatus(..., "")` bedeutet
-`Owner request`.
+bedeutet USD, `GetTldList(0)` bedeutet 20, `CheckAvailability(..., "")` bedeutet `create` und
+`SetForwarding(..., "")` bedeutet `Standard`.
 `RegisterWithContactInfo` erhält seine vier optionalen Argumente in einem `*RegisterOptions` (nil = Standardwerte).
 `AddResourceRecordValue` und `ReplaceResourceRecordValue` erwarten `ttl *int`: `nil` behält die
 aktuelle TTL des Record-Sets bei.
@@ -163,7 +163,8 @@ contacts = dna.AllRoles(contact)                 // derselbe Kontakt für alle v
 contacts = dna.ContactsFromMap(map[string]map[string]any{ /* Rolle => Kontakt */ })
 ```
 
-Unvollständige Kontakte werden vor dem Senden nach den Regeln von `ValidateContact` ergänzt.
+Unvollständige Kontakte werden vor dem Senden nach den Regeln von `ValidateContact` ergänzt. Kontakte
+werden von `RegisterWithContactInfo` und `SaveContacts` verwendet; Transfers senden niemals Kontakte.
 
 ### Methodennamen
 
@@ -248,7 +249,9 @@ map[string]any{
 ```
 
 Der Registrierungs-Endpunkt antwortet mit einem kurzen Datensatz, daher sind die meisten Felder leer;
-rufen Sie anschließend `GetDetails` auf, um die vollständigen Domain-Daten zu erhalten.
+rufen Sie anschließend `GetDetails` auf, um die vollständigen Domain-Daten zu erhalten. Lehnt das
+Gateway die Registrierung ab (HTTP 200 mit `"success": false`), ist das Ergebnis ein Fehler mit dem
+Code `REGISTER_DOMAIN` und der Meldung des Gateways.
 
 </details>
 
@@ -267,6 +270,9 @@ result := client.Renew("example.com", 1)
 map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03-15T10:00:00"}}
 ```
 
+Eine Ablehnung durch das Gateway (`"success": false`) liefert den Code `RENEW_DOMAIN`; ein Erfolg ohne
+Ablaufdatum liefert `DOMAIN_RENEW`.
+
 </details>
 
 <hr style="border: 4px solid #000; border-style: dashed;">
@@ -274,11 +280,13 @@ map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03
 ### Domain-Transfer
 
 ```go
-result := client.Transfer("example.com", "Xy9#mK2$", 1, nil)
+result := client.Transfer("example.com", "Xy9#mK2$", 1)
 ```
 
-Wie in der Facade von php-dna wird das Kontakt-Argument nicht weitergereicht: Die Transfer-Anfrage
-enthält immer eine leere Kontaktliste. Das Ergebnis hat dieselbe Struktur wie `GetDetails`.
+Transfers senden niemals Kontakte: Der Registrar übernimmt sie zusammen mit der Domain, daher enthält
+die Anfrage immer eine leere Kontaktliste und die Methode hat keinen Kontakt-Parameter. Das Ergebnis
+hat dieselbe Struktur wie `GetDetails`; eine Ablehnung durch das Gateway (`"success": false`) liefert
+den Code `TRANSFER_DOMAIN` mit der Meldung des Gateways.
 
 <details>
 <summary>Beispielausgabe für Domain-Transfer</summary>
@@ -517,13 +525,13 @@ result := client.ModifyNameServer("example.com", []string{"ns1.example.com", "ns
 
 Eine Map wird ebenfalls akzeptiert (ihre Werte werden in Schlüsselreihenfolge verwendet). Vor dem
 Senden werden die Einträge von Leerzeichen befreit, in Kleinbuchstaben umgewandelt, von einem
-abschließenden Punkt befreit und dedupliziert.
+abschließenden Punkt befreit und dedupliziert; das Ergebnis gibt diese normalisierte Liste zurück.
 
 <details>
 <summary>Beispielausgabe für Nameserver-Änderung</summary>
 
 ```go
-map[string]any{"result": "OK", "data": map[string]any{"NameServers": []string{"ns1.example.com", "ns2.example.com"}}}
+map[string]any{"result": "OK", "data": map[string]any{"NameServers": []any{"ns1.example.com", "ns2.example.com"}}}
 ```
 
 </details>
@@ -621,6 +629,11 @@ map[string]any{"result": "OK", "data": map[string]any{"NameServer": "ns1.example
 result := client.ModifyPrivacyProtectionStatus("example.com", true, "Owner request")
 ```
 
+`status` ist ein Bool oder ein Wert, wie ihn Panels speichern: `true`, `1`, `"1"`, `"true"`, `"on"`
+und `"yes"` aktivieren den Datenschutz, alles andere (`"off"`, `"0"`, `false`, ...) deaktiviert ihn.
+Die Begründung (reason) bleibt nur aus Kompatibilität zu php-dna erhalten und wird nicht gesendet: Das
+Gateway kennt kein solches Feld.
+
 <details>
 <summary>Beispielausgabe für Domain-Datenschutz ändern</summary>
 
@@ -637,6 +650,10 @@ map[string]any{"result": "OK", "data": map[string]any{"PrivacyProtectionStatus":
 ```go
 result := client.GetContacts("example.com")
 ```
+
+Die Kontakttypen des Gateways werden ohne Beachtung der Groß-/Kleinschreibung zugeordnet
+(`Admin`/`Administrative`, `Tech`/`Technical`, `Registrant`/`Owner`, `Billing`); jeder andere Typ
+bleibt unter seinem eigenen, großgeschriebenen Namen erhalten.
 
 <details>
 <summary>Beispielausgabe für Domain-Kontakte abrufen</summary>
@@ -707,7 +724,7 @@ map[string]any{
 	"symbol":   "$",
 	"balances": []any{
 		map[string]any{"balance": "601.64", "currency": "USD", "symbol": "$"},
-		map[string]any{"balance": "1250.5", "currency": "TL", "symbol": "TL"},
+		map[string]any{"balance": "1250.50", "currency": "TL", "symbol": "TL"},
 	},
 }
 ```
@@ -738,8 +755,10 @@ map[string]any{
 }
 ```
 
-Im Fehlerfall: `ErrorCode` ist `API_<status>`, `OperationMessage` die Fehlermeldung,
-`OperationResult` `"FAILED"` und `Balance` `"0.00"`.
+Im Fehlerfall: `ErrorCode` ist `API_<status>` (oder `CURL_<n>`), `OperationMessage` die
+Fehlermeldung, `OperationResult` `"FAILED"` und `Balance` `"0.00"`. Das Konto meldet nur USD- und
+TRY-Guthaben: Für jede andere Währung ist das Ergebnis `FAILED` mit `ErrorCode: "BALANCE"` und
+`No EUR balance is reported for this account. Available: USD, TRY.`
 
 </details>
 
@@ -752,8 +771,10 @@ Schreibvorgang ersetzt das gesamte Set. Record-Namen können als `@`, `""`, Zone
 Label (`www`) oder vollständiger Name (`www.example.com`) angegeben werden; sie werden auf das relative
 Label reduziert, das das Gateway erwartet. Unterstützte Typen: `A`, `AAAA`, `ALIAS`, `CAA`, `CNAME`,
 `DS`, `MX`, `NAPTR`, `PTR`, `SRV`, `TLSA`, `TXT` (andere werden vor jedem Aufruf abgewiesen). Die TTL
-wird auf 1..86400 begrenzt. Mit `apply = true` (Standard in php-dna) werden Änderungen sofort
-übernommen; aufeinanderfolgende Zonen-Aufrufe liegen mindestens eine Sekunde auseinander, weil das
+wird auf 1..86400 begrenzt, und das Ergebnis meldet den großgeschriebenen Typ und die TTL, die
+tatsächlich gesendet wurden. Mit `apply = true` (Standard in php-dna) werden Änderungen sofort
+übernommen; schlägt dieses Apply fehl, wird dessen Fehler-Umschlag zurückgegeben (die Änderung bleibt
+vorgemerkt). Aufeinanderfolgende Zonen-Aufrufe liegen mindestens eine Sekunde auseinander, weil das
 Gateway Anfrage-Spitzen per Rate-Limit drosselt.
 
 ```go
@@ -828,14 +849,20 @@ client.DeleteForwarding("example.com")
 // SetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// GetForwarding (keine Weiterleitung konfiguriert: Enabled false, trotzdem OK)
+// GetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"Enabled": true, "RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// DeleteForwarding
-map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com"}}
+// GetForwarding, wenn keine Weiterleitung konfiguriert ist
+map[string]any{"result": "OK", "data": map[string]any{"Enabled": false, "RedirectAddress": "", "ForwardType": ""}}
+
+// DeleteForwarding (Removed ist false, wenn nichts konfiguriert war)
+map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com", "Removed": true}}
 ```
 
 </details>
+
+Nur die Gateway-Antwort "Redirect information not found" bedeutet „nicht konfiguriert“; jeder andere
+Fehler, zum Beispiel eine unbekannte Domain, wird als Fehler zurückgegeben.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -852,7 +879,8 @@ client.ValidateContact(map[string]any{"FirstName": " Jo ", "Phone": "+90 (532) 3
 
 `ValidateContact` füllt fehlende Felder mit Platzhaltern, entfernt Ziffern und Satzzeichen aus Namen,
 greift bei fehlendem State auf City zurück, ordnet gängige Ländernamen ISO-Codes zu und zerlegt
-Telefon- und Faxnummern in Rufnummer und Ländervorwahl.
+Telefon- und Faxnummern in Rufnummer und Ländervorwahl. Eine Nummer mit eigener internationaler
+Vorwahl (`+44 20 ...`, `0044 20 ...`) behält ihre eigene Ländervorwahl, auch wenn eine andere angegeben ist.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -873,16 +901,22 @@ Goroutinen, sondern erstellen Sie pro Goroutine einen eigenen.
 
 ## Fehlerbehandlung
 
-- Gateway-Fehler liefern `Code: "API_<HTTP status>"`. Die Meldung stammt vom Gateway; ein leerer
-  Fehler-Body wird zu `HTTP 429 - Too Many Requests` (usw.), Validierungsfehler werden in `Details`
-  Feld für Feld aufgelistet (`Admin PostalCode - 'PostalCode' is required`), und Standardtexte des
-  Backends wie `Exception of type '...' was thrown` werden durch die aussagekräftigen Details ersetzt.
+- Gateway-Fehler liefern `Code: "API_<HTTP status>"`. Hat das Gateway einen eigenen Fehlercode
+  gesendet (zum Beispiel `Dna.DomainService:Domain:10007`), wird dieser als `GatewayCode` ergänzt,
+  sodass Aufrufer „Domain nicht gefunden“ von „TLD nicht unterstützt“ unterscheiden können. Die
+  Meldung stammt vom Gateway; ein leerer Fehler-Body wird zu `HTTP 429 - Too Many Requests` (usw.),
+  Validierungsfehler werden in `Details` Feld für Feld aufgelistet
+  (`Admin PostalCode - 'PostalCode' is required`), und Standardtexte des Backends wie
+  `Exception of type '...' was thrown` werden durch die Details des Gateways oder durch eine stabile
+  Meldung mit dem Fehlercode ersetzt — niemals durch den rohen Antwort-Body.
 - Eine 301/302-Antwort bedeutet, dass die Zugangsdaten abgelehnt wurden: `Message: "Invalid API credentials"`.
 - Transportfehler (Timeout, DNS, TLS, Verbindungsabbruch) sind Fehler, niemals ein leerer Erfolg. Ein
-  Timeout liefert `Code: "API_28"` und `Could not reach the DomainNameAPI service: the connection
-  timed out. (...)`; andere Fehler verwenden Nummern im curl-Stil (`API_6` DNS, `API_7` Verbindung,
-  `API_35` TLS, `API_56` Reset, `API_60` Zertifikat) und `Curl error during request: ...`.
-  `GetParsedResponseData()["Code"]` enthält `CURL_<n>`.
+  Timeout liefert `Code: "CURL_28"` und `Could not reach the DomainNameAPI service: the connection
+  timed out. (...)`; andere Fehler verwenden Nummern im curl-Stil (`CURL_6` DNS, `CURL_7` Verbindung,
+  `CURL_35` TLS, `CURL_56` Reset, `CURL_60` Zertifikat) und `Curl error during request: ...`.
+  `API_<n>` ist HTTP-Statuscodes vorbehalten.
+- Antworten mit HTTP 200 und `"success": false` bei Registrierung, Transfer und Verlängerung sind
+  Ablehnungen: `REGISTER_DOMAIN`, `TRANSFER_DOMAIN` oder `RENEW_DOMAIN` mit der Meldung des Gateways.
 - Ein leerer oder `null`-Erfolgs-Body liefert `Code: "RESPONSE"`.
 - Timeouts: 30 Sekunden pro Aufruf, 10 Sekunden für den Verbindungsaufbau.
 
@@ -954,7 +988,7 @@ docker run --rm -v "$PWD":/src -w /src golang:1.23 go vet ./...
 ```
 
 Die Testsuite enthält Unit-Tests für die HTTP-Schicht, die Fehlerzuordnung, die Telemetrie und die
-Hilfsfunktionen sowie einen Konformitätstest, der alle 126 php-dna-Fixtures aus `testdata/conformance`
+Hilfsfunktionen sowie einen Konformitätstest, der alle 134 php-dna-Fixtures aus `testdata/conformance`
 erneut abspielt (Anfragen auf der Leitung und Rückgabewerte müssen exakt mit php-dna übereinstimmen).
 Kein Test greift auf das Netzwerk zu.
 
@@ -972,10 +1006,13 @@ Kein Test greift auf das Netzwerk zu.
 | 2304 | Objektstatus verhindert Operation              | Domain-Status erlaubt keine Aktualisierung, ist für Updates gesperrt. Status darf nicht "clientupdateprohibited" sein. Kann auch an anderen Statusbedingungen liegen. |
 
 Bibliothekscodes: `RESPONSE` (leere Antwort), `CREDENTIALS` (ungültiges Antwortformat vom
-Account-Endpunkt), `AVAILABILITY` (keine Domainnamen angegeben), `TRANSFER_NOT_AVAILABLE`,
-`DOMAIN_RENEW` (Verlängerung ohne Ablaufdatum), `ADD_ZONE`, `EDIT_ZONE`, `SET_ZONE`, `DELETE_ZONE`
-(nicht unterstützter Record-Typ oder Wert nicht gefunden), `SET_FORWARD` (nicht unterstützter
-Weiterleitungstyp oder leere Adresse).
+Account-Endpunkt), `AVAILABILITY` (keine Domainnamen angegeben), `BALANCE` (Währung wird vom Konto
+nicht gemeldet), `TRANSFER_NOT_AVAILABLE`, `REGISTER_DOMAIN` / `TRANSFER_DOMAIN` / `RENEW_DOMAIN`
+(das Gateway hat den Vorgang abgelehnt), `DOMAIN_RENEW` (Verlängerung ohne Ablaufdatum), `ADD_ZONE`,
+`EDIT_ZONE`, `SET_ZONE`, `DELETE_ZONE` (nicht unterstützter Record-Typ oder Wert nicht gefunden),
+`SET_FORWARD` (nicht unterstützter Weiterleitungstyp oder leere Adresse), `CURL_<n>`
+(Transportfehler), `API_<status>` (HTTP-Fehler, mit `GatewayCode`, wenn das Gateway einen eigenen
+Code gesendet hat).
 
 ## Lizenz
 

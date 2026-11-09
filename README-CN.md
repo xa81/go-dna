@@ -113,9 +113,10 @@ map[string]any{"result": "OK", "data": map[string]any{ /* ... */ }}
 map[string]any{
 	"result": "ERROR",
 	"error": map[string]any{
-		"Code":    "API_404",      // API_<HTTP 状态码>，或库自身的代码，例如 RESPONSE
-		"Message": "The domain name you requested could not be found. Please check and try again.",
-		"Details": "The domain could not be found. Please check and try again.",
+		"Code":        "API_404", // API_<HTTP 状态码>、CURL_<n>，或库自身的代码，例如 RESPONSE
+		"Message":     "The domain name you requested could not be found. Please check and try again.",
+		"Details":     "The domain could not be found. Please check and try again.",
+		"GatewayCode": "Dna.DomainService:Domain:10007", // 仅与 API_<status> 一起出现，当网关发送了自己的代码时
 	},
 }
 ```
@@ -132,8 +133,7 @@ map[string]any{
 
 Go 没有默认参数。各方法保持 php-dna 的参数顺序，并显式接收每一个参数；php-dna 的默认值在下文各节中给出。
 为方便起见，部分零值会选择默认值：`GetCurrentBalance("")` 表示 USD，`GetTldList(0)` 表示 20，
-`CheckAvailability(..., "")` 表示 `create`，`SetForwarding(..., "")` 表示 `Standard`，
-`ModifyPrivacyProtectionStatus(..., "")` 表示 `Owner request`。
+`CheckAvailability(..., "")` 表示 `create`，`SetForwarding(..., "")` 表示 `Standard`。
 `RegisterWithContactInfo` 通过 `*RegisterOptions` 接收其四个可选参数（nil = 默认值）。
 `AddResourceRecordValue` 和 `ReplaceResourceRecordValue` 接收 `ttl *int`：`nil` 表示保留记录集当前的 TTL。
 
@@ -155,7 +155,8 @@ contacts = dna.AllRoles(contact)                 // 四个角色使用同一个�
 contacts = dna.ContactsFromMap(map[string]map[string]any{ /* role => contact */ })
 ```
 
-信息不完整的联系人会在发送前按照 `ValidateContact` 的规则补全。
+信息不完整的联系人会在发送前按照 `ValidateContact` 的规则补全。联系人由 `RegisterWithContactInfo`
+和 `SaveContacts` 使用；转移操作从不发送联系人。
 
 ### 方法名称
 
@@ -237,7 +238,8 @@ map[string]any{
 }
 ```
 
-注册端点只返回一条简短记录，因此大多数字段为空；如需完整的域名信息，请随后调用 `GetDetails`。
+注册端点只返回一条简短记录，因此大多数字段为空；如需完整的域名信息，请随后调用 `GetDetails`。当网关拒绝注册时
+（HTTP 200 且 `"success": false`），结果为错误，代码为 `REGISTER_DOMAIN`，并附带网关的消息。
 
 </details>
 
@@ -256,6 +258,8 @@ result := client.Renew("example.com", 1)
 map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03-15T10:00:00"}}
 ```
 
+网关拒绝（`"success": false`）时返回代码 `RENEW_DOMAIN`；成功但没有到期日期时返回 `DOMAIN_RENEW`。
+
 </details>
 
 <hr style="border: 4px solid #000; border-style: dashed;">
@@ -263,11 +267,12 @@ map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03
 ### 域名转移
 
 ```go
-result := client.Transfer("example.com", "Xy9#mK2$", 1, nil)
+result := client.Transfer("example.com", "Xy9#mK2$", 1)
 ```
 
-与 php-dna 的外观类（facade）一样，联系人参数不会被转发：转移请求始终携带一个空的联系人列表。
-返回结果与 `GetDetails` 的结构相同。
+转移操作从不发送联系人：注册商会随域名一并接管联系人，因此请求始终携带一个空的联系人列表，
+该方法也没有联系人参数。返回结果与 `GetDetails` 的结构相同；网关拒绝（`"success": false`）时
+返回代码 `TRANSFER_DOMAIN` 并附带网关的消息。
 
 <details>
 <summary>域名转移示例输出</summary>
@@ -503,13 +508,13 @@ map[string]any{
 result := client.ModifyNameServer("example.com", []string{"ns1.example.com", "ns2.example.com"})
 ```
 
-也接受 map（按键的顺序使用其值）。发送前，各条目会被去除首尾空白、转换为小写、去掉末尾的点并去重。
+也接受 map（按键的顺序使用其值）。发送前，各条目会被去除首尾空白、转换为小写、去掉末尾的点并去重；结果中返回的就是规范化后的列表。
 
 <details>
 <summary>修改名称服务器示例输出</summary>
 
 ```go
-map[string]any{"result": "OK", "data": map[string]any{"NameServers": []string{"ns1.example.com", "ns2.example.com"}}}
+map[string]any{"result": "OK", "data": map[string]any{"NameServers": []any{"ns1.example.com", "ns2.example.com"}}}
 ```
 
 </details>
@@ -607,6 +612,10 @@ map[string]any{"result": "OK", "data": map[string]any{"NameServer": "ns1.example
 result := client.ModifyPrivacyProtectionStatus("example.com", true, "Owner request")
 ```
 
+`status` 可以是 bool，也可以是面板存储的值：`true`、`1`、`"1"`、`"true"`、`"on"` 和 `"yes"` 启用
+隐私保护，其他任何值（`"off"`、`"0"`、`false` 等）则禁用。原因参数仅为兼容 php-dna 而保留，不会被发送：
+网关没有这样的字段。
+
 <details>
 <summary>修改隐私保护状态示例输出</summary>
 
@@ -623,6 +632,9 @@ map[string]any{"result": "OK", "data": map[string]any{"PrivacyProtectionStatus":
 ```go
 result := client.GetContacts("example.com")
 ```
+
+网关返回的联系人类型按不区分大小写的方式匹配（`Admin`/`Administrative`、`Tech`/`Technical`、
+`Registrant`/`Owner`、`Billing`）；其他任何类型都会以其首字母大写的名称保留。
 
 <details>
 <summary>获取域名联系人示例输出</summary>
@@ -693,7 +705,7 @@ map[string]any{
 	"symbol":   "$",
 	"balances": []any{
 		map[string]any{"balance": "601.64", "currency": "USD", "symbol": "$"},
-		map[string]any{"balance": "1250.5", "currency": "TL", "symbol": "TL"},
+		map[string]any{"balance": "1250.50", "currency": "TL", "symbol": "TL"},
 	},
 }
 ```
@@ -724,8 +736,10 @@ map[string]any{
 }
 ```
 
-失败时：`ErrorCode` 为 `API_<status>`，`OperationMessage` 为错误消息，
-`OperationResult` 为 `"FAILED"`，`Balance` 为 `"0.00"`。
+失败时：`ErrorCode` 为 `API_<status>`（或 `CURL_<n>`），`OperationMessage` 为错误消息，
+`OperationResult` 为 `"FAILED"`，`Balance` 为 `"0.00"`。账户只报告 USD 和 TRY 余额：
+对于其他任何货币，结果为 `FAILED`，`ErrorCode: "BALANCE"`，消息为
+`No EUR balance is reported for this account. Available: USD, TRY.`
 
 </details>
 
@@ -736,9 +750,9 @@ map[string]any{
 网关以**记录集**的形式存储记录（一个名称 + 类型及其所有值），每次写入都会替换整个记录集。
 记录名称可以写作 `@`、`""`、区域顶点（apex）、相对标签（`www`）或完整名称（`www.example.com`）；
 它们都会被归约为网关所期望的相对标签。支持的类型：`A`、`AAAA`、`ALIAS`、`CAA`、`CNAME`、`DS`、`MX`、
-`NAPTR`、`PTR`、`SRV`、`TLSA`、`TXT`（其他类型会在发出任何调用之前被拒绝）。TTL 会被限制在 1..86400 范围内。
-当 `apply = true`（php-dna 的默认值）时，更改会立即提交；由于网关会对突发请求进行限流，连续的区域调用之间
-至少间隔一秒。
+`NAPTR`、`PTR`、`SRV`、`TLSA`、`TXT`（其他类型会在发出任何调用之前被拒绝）。TTL 会被限制在 1..86400 范围内，结果中返回实际发送的大写类型和 TTL。
+当 `apply = true`（php-dna 的默认值）时，更改会立即提交；若该提交失败，则返回其错误信封（更改仍处于暂存状态）。
+由于网关会对突发请求进行限流，连续的区域调用之间至少间隔一秒。
 
 ```go
 // 列表：每个值一行，名称为完全限定名
@@ -812,14 +826,19 @@ client.DeleteForwarding("example.com")
 // SetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// GetForwarding（未配置转发时：Enabled 为 false，结果仍为 OK）
+// GetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"Enabled": true, "RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// DeleteForwarding
-map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com"}}
+// 未配置任何转发时的 GetForwarding
+map[string]any{"result": "OK", "data": map[string]any{"Enabled": false, "RedirectAddress": "", "ForwardType": ""}}
+
+// DeleteForwarding（未配置任何转发时 Removed 为 false）
+map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com", "Removed": true}}
 ```
 
 </details>
+
+只有网关返回 "Redirect information not found" 时才表示"未配置"；其他任何错误（例如未知域名）都会作为错误返回。
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -835,7 +854,8 @@ client.ValidateContact(map[string]any{"FirstName": " Jo ", "Phone": "+90 (532) 3
 ```
 
 `ValidateContact` 会用占位值填充缺失字段，删除姓名中的数字和标点符号，在缺少 State 时回退使用 City，
-将常见的国家名称映射为 ISO 代码，并将电话和传真号码拆分为号码和国家代码。
+将常见的国家名称映射为 ISO 代码，并将电话和传真号码拆分为号码和国家代码。带有自身国际前缀的号码（`+44 20 ...`、`0044 20 ...`）
+即使另外提供了其他国家代码，也会保留其自身的国家代码。
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -856,16 +876,20 @@ client.SetServiceURL("https://ote.domainresellerapi.com/api/v1")
 
 ## 错误处理
 
-- 网关错误返回 `Code: "API_<HTTP status>"`。消息来自网关；空的错误响应体会变为
+- 网关错误返回 `Code: "API_<HTTP status>"`。当网关发送了自己的错误代码
+  （例如 `Dna.DomainService:Domain:10007`）时，该代码会作为 `GatewayCode` 添加，以便调用方区分
+  "域名未找到"与"不支持该 TLD"。消息来自网关；空的错误响应体会变为
   `HTTP 429 - Too Many Requests`（以此类推），验证错误会在 `Details` 中逐字段列出
   （`Admin PostalCode - 'PostalCode' is required`），而 `Exception of type '...' was thrown` 之类的后端
-  模板化信息会被替换为有用的详细信息。
+  模板化信息会被替换为网关的详细信息，或替换为一条注明错误代码的固定消息 — 绝不会替换为原始响应体。
 - 301/302 响应表示凭据被拒绝：`Message: "Invalid API credentials"`。
 - 传输故障（超时、DNS、TLS、连接重置）都会作为错误返回，绝不会是空的成功结果。超时返回
-  `Code: "API_28"` 和 `Could not reach the DomainNameAPI service: the connection
-  timed out. (...)`；其他故障使用 curl 风格的编号（`API_6` DNS、`API_7` 连接、`API_35`
-  TLS、`API_56` 重置、`API_60` 证书）以及 `Curl error during request: ...`。
-  `GetParsedResponseData()["Code"]` 中保存的是 `CURL_<n>`。
+  `Code: "CURL_28"` 和 `Could not reach the DomainNameAPI service: the connection
+  timed out. (...)`；其他故障使用 curl 风格的编号（`CURL_6` DNS、`CURL_7` 连接、
+  `CURL_35` TLS、`CURL_56` 重置、`CURL_60` 证书）以及 `Curl error during request: ...`。
+  `API_<n>` 专用于 HTTP 状态码。
+- 注册、转移和续费返回 HTTP 200 且 `"success": false` 时视为被拒绝：
+  返回 `REGISTER_DOMAIN`、`TRANSFER_DOMAIN` 或 `RENEW_DOMAIN`，并附带网关的消息。
 - 空的或 `null` 的成功响应体返回 `Code: "RESPONSE"`。
 - 超时设置：每次调用 30 秒，建立连接 10 秒。
 
@@ -931,7 +955,7 @@ docker run --rm -v "$PWD":/src -w /src golang:1.23 go vet ./...
 ```
 
 测试套件包含针对 HTTP 层、错误映射、遥测和实用工具的单元测试，以及一个一致性测试，该测试会回放
-`testdata/conformance` 中全部 126 个 php-dna 测试用例（线上请求和返回值必须与 php-dna 完全一致）。
+`testdata/conformance` 中全部 134 个 php-dna 测试用例（线上请求和返回值必须与 php-dna 完全一致）。
 没有任何测试会访问网络。
 
 ## 返回和错误代码及说明
@@ -948,8 +972,10 @@ docker run --rm -v "$PWD":/src -w /src golang:1.23 go vet ./...
 | 2304 | 对象状态禁止操作 | 域名状态不适合更新，已锁定更新操作。状态不应为"clientupdateprohibited"。可能由于其他状态条件。 |
 
 库代码：`RESPONSE`（空响应）、`CREDENTIALS`（账户端点返回的响应格式无效）、`AVAILABILITY`（未提供域名）、
-`TRANSFER_NOT_AVAILABLE`、`DOMAIN_RENEW`（续费时缺少到期日期）、`ADD_ZONE`、`EDIT_ZONE`、`SET_ZONE`、
-`DELETE_ZONE`（不支持的记录类型或未找到该值）、`SET_FORWARD`（不支持的转发类型或地址为空）。
+`BALANCE`（账户未报告该货币）、`TRANSFER_NOT_AVAILABLE`、`REGISTER_DOMAIN` / `TRANSFER_DOMAIN` /
+`RENEW_DOMAIN`（网关拒绝了该操作）、`DOMAIN_RENEW`（续费时缺少到期日期）、`ADD_ZONE`、`EDIT_ZONE`、`SET_ZONE`、
+`DELETE_ZONE`（不支持的记录类型或未找到该值）、`SET_FORWARD`（不支持的转发类型或地址为空）、
+`CURL_<n>`（传输故障）、`API_<status>`（HTTP 错误，当网关发送了自己的代码时附带 `GatewayCode`）。
 
 ## 许可证
 

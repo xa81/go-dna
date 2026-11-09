@@ -116,9 +116,10 @@ Başarısız çağrılar asla panic oluşturmaz; hata zarfını (error envelope)
 map[string]any{
 	"result": "ERROR",
 	"error": map[string]any{
-		"Code":    "API_404",      // API_<HTTP durum kodu> veya RESPONSE gibi bir kütüphane kodu
-		"Message": "The domain name you requested could not be found. Please check and try again.",
-		"Details": "The domain could not be found. Please check and try again.",
+		"Code":        "API_404", // API_<HTTP durum kodu>, CURL_<n> veya RESPONSE gibi bir kütüphane kodu
+		"Message":     "The domain name you requested could not be found. Please check and try again.",
+		"Details":     "The domain could not be found. Please check and try again.",
+		"GatewayCode": "Dna.DomainService:Domain:10007", // yalnızca API_<status> ile, gateway kendi kodunu gönderdiğinde
 	},
 }
 ```
@@ -136,8 +137,7 @@ map[string]any{
 Go'da varsayılan argüman yoktur. Metotlar php-dna'nın parametre sırasını korur ve her argümanı açıkça
 alır; php-dna'daki varsayılan değer aşağıdaki her bölümde gösterilmiştir. Kolaylık olsun diye bazı sıfır
 değerler varsayılanı seçer: `GetCurrentBalance("")` USD, `GetTldList(0)` 20,
-`CheckAvailability(..., "")` `create`, `SetForwarding(..., "")` `Standard` ve
-`ModifyPrivacyProtectionStatus(..., "")` `Owner request` anlamına gelir.
+`CheckAvailability(..., "")` `create` ve `SetForwarding(..., "")` `Standard` anlamına gelir.
 `RegisterWithContactInfo`, dört isteğe bağlı argümanını bir `*RegisterOptions` içinde alır (nil = varsayılanlar).
 `AddResourceRecordValue` ve `ReplaceResourceRecordValue` `ttl *int` alır: `nil`, kayıt kümesinin
 mevcut TTL değerini korur.
@@ -161,7 +161,8 @@ contacts = dna.AllRoles(contact)                 // dört rolün tamamı için a
 contacts = dna.ContactsFromMap(map[string]map[string]any{ /* rol => kişi */ })
 ```
 
-Yarı boş kişi bilgileri gönderilmeden önce `ValidateContact` kurallarıyla tamamlanır.
+Yarı boş kişi bilgileri gönderilmeden önce `ValidateContact` kurallarıyla tamamlanır. Kişi bilgileri
+`RegisterWithContactInfo` ve `SaveContacts` tarafından kullanılır; transferler asla kişi bilgisi göndermez.
 
 ### Metot adları
 
@@ -246,7 +247,8 @@ map[string]any{
 ```
 
 Kayıt uç noktası kısa bir kayıtla yanıt verdiği için alanların çoğu boştur; alan adının tüm
-bilgileri için ardından `GetDetails` çağırın.
+bilgileri için ardından `GetDetails` çağırın. Gateway kaydı reddettiğinde (`"success": false` içeren
+HTTP 200 yanıtı) sonuç, `REGISTER_DOMAIN` kodlu ve gateway'in mesajını içeren bir hatadır.
 
 </details>
 
@@ -265,6 +267,9 @@ result := client.Renew("example.com", 1)
 map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03-15T10:00:00"}}
 ```
 
+Gateway'in reddi (`"success": false`) `RENEW_DOMAIN` kodunu döndürür; bitiş tarihi içermeyen başarılı
+bir yanıt ise `DOMAIN_RENEW` döndürür.
+
 </details>
 
 <hr style="border: 4px solid #000; border-style: dashed;">
@@ -272,11 +277,13 @@ map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03
 ### Domain Transfer
 
 ```go
-result := client.Transfer("example.com", "Xy9#mK2$", 1, nil)
+result := client.Transfer("example.com", "Xy9#mK2$", 1)
 ```
 
-php-dna'nın facade'ında olduğu gibi kişi argümanı iletilmez: transfer isteği her zaman boş bir kişi
-listesi taşır. Sonuç, `GetDetails` ile aynı yapıdadır.
+Transferler asla kişi bilgisi göndermez: kayıt firması kişi bilgilerini alan adıyla birlikte devralır;
+bu nedenle istek her zaman boş bir kişi listesi taşır ve metodun kişi parametresi yoktur. Sonuç,
+`GetDetails` ile aynı yapıdadır; gateway'in reddi (`"success": false`) gateway'in mesajıyla birlikte
+`TRANSFER_DOMAIN` kodunu döndürür.
 
 <details>
 <summary>Domain Transfer Örnek Çıktı</summary>
@@ -513,13 +520,14 @@ result := client.ModifyNameServer("example.com", []string{"ns1.example.com", "ns
 ```
 
 Map de kabul edilir (değerleri anahtar sırasına göre kullanılır). Girdiler gönderilmeden önce
-boşluklardan arındırılır, küçük harfe çevrilir, sondaki nokta kaldırılır ve tekrarlar ayıklanır.
+boşluklardan arındırılır, küçük harfe çevrilir, sondaki nokta kaldırılır ve tekrarlar ayıklanır;
+sonuçta bu normalize edilmiş liste döner.
 
 <details>
 <summary>Nameserver Düzenlemesi Örnek Çıktı</summary>
 
 ```go
-map[string]any{"result": "OK", "data": map[string]any{"NameServers": []string{"ns1.example.com", "ns2.example.com"}}}
+map[string]any{"result": "OK", "data": map[string]any{"NameServers": []any{"ns1.example.com", "ns2.example.com"}}}
 ```
 
 </details>
@@ -617,6 +625,10 @@ map[string]any{"result": "OK", "data": map[string]any{"NameServer": "ns1.example
 result := client.ModifyPrivacyProtectionStatus("example.com", true, "Owner request")
 ```
 
+`status` bir bool ya da panellerin sakladığı bir değerdir: `true`, `1`, `"1"`, `"true"`, `"on"` ve
+`"yes"` gizliliği açar; diğer her şey (`"off"`, `"0"`, `false`, ...) kapatır. Gerekçe (reason)
+yalnızca php-dna uyumluluğu için korunur ve gönderilmez: gateway'de böyle bir alan yoktur.
+
 <details>
 <summary>Domain gizliliği değiştirme Örnek Çıktı</summary>
 
@@ -633,6 +645,9 @@ map[string]any{"result": "OK", "data": map[string]any{"PrivacyProtectionStatus":
 ```go
 result := client.GetContacts("example.com")
 ```
+
+Gateway kişi türleri büyük/küçük harf duyarsız eşleştirilir (`Admin`/`Administrative`,
+`Tech`/`Technical`, `Registrant`/`Owner`, `Billing`); diğer türler kendi baş harfi büyük adıyla korunur.
 
 <details>
 <summary>Domain contact bilgilerini alma Örnek Çıktı</summary>
@@ -703,7 +718,7 @@ map[string]any{
 	"symbol":   "$",
 	"balances": []any{
 		map[string]any{"balance": "601.64", "currency": "USD", "symbol": "$"},
-		map[string]any{"balance": "1250.5", "currency": "TL", "symbol": "TL"},
+		map[string]any{"balance": "1250.50", "currency": "TL", "symbol": "TL"},
 	},
 }
 ```
@@ -734,8 +749,10 @@ map[string]any{
 }
 ```
 
-Hata durumunda: `ErrorCode` `API_<status>`, `OperationMessage` hata mesajı, `OperationResult`
-`"FAILED"` ve `Balance` `"0.00"` olur.
+Hata durumunda: `ErrorCode` `API_<status>` (veya `CURL_<n>`), `OperationMessage` hata mesajı,
+`OperationResult` `"FAILED"` ve `Balance` `"0.00"` olur. Hesap yalnızca USD ve TRY bakiyelerini
+bildirir: başka herhangi bir para birimi için sonuç `ErrorCode: "BALANCE"` ve
+`No EUR balance is reported for this account. Available: USD, TRY.` ile `FAILED` olur.
 
 </details>
 
@@ -748,8 +765,10 @@ yazma işlemi kümenin tamamını değiştirir. Kayıt adları `@`, `""`, zone k
 (`www`) veya tam ad (`www.example.com`) olarak verilebilir; hepsi gateway'in beklediği göreli etikete
 indirgenir. Desteklenen türler: `A`, `AAAA`, `ALIAS`, `CAA`, `CNAME`, `DS`, `MX`, `NAPTR`, `PTR`,
 `SRV`, `TLSA`, `TXT` (diğerleri herhangi bir çağrı yapılmadan reddedilir). TTL 1..86400 aralığına
-sınırlanır. `apply = true` ile (php-dna varsayılanı) değişiklikler hemen uygulanır; gateway ani istek
-yığınlarına hız sınırı uyguladığı için ardışık zone çağrıları arasında en az bir saniye bırakılır.
+sınırlanır ve sonuç, gerçekte gönderilen büyük harfli türü ve TTL değerini bildirir. `apply = true` ile
+(php-dna varsayılanı) değişiklikler hemen uygulanır; bu uygulama (apply) başarısız olursa onun hata
+zarfı döndürülür (değişiklik beklemede kalır). Gateway ani istek yığınlarına hız sınırı uyguladığı için
+ardışık zone çağrıları arasında en az bir saniye bırakılır.
 
 ```go
 // Listeleme: her değer için bir satır, adlar tam nitelikli (FQDN)
@@ -823,14 +842,20 @@ client.DeleteForwarding("example.com")
 // SetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// GetForwarding (yönlendirme tanımlı değilse: Enabled false, yine de OK)
+// GetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"Enabled": true, "RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// DeleteForwarding
-map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com"}}
+// Yönlendirme tanımlı değilken GetForwarding
+map[string]any{"result": "OK", "data": map[string]any{"Enabled": false, "RedirectAddress": "", "ForwardType": ""}}
+
+// DeleteForwarding (hiçbir şey tanımlı değilse Removed false olur)
+map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com", "Removed": true}}
 ```
 
 </details>
+
+Yalnızca gateway'in "Redirect information not found" yanıtı "tanımlı değil" anlamına gelir; diğer tüm
+hatalar, örneğin bilinmeyen bir alan adı, hata olarak döndürülür.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -847,7 +872,8 @@ client.ValidateContact(map[string]any{"FirstName": " Jo ", "Phone": "+90 (532) 3
 
 `ValidateContact` eksik alanları yer tutucu değerlerle doldurur, adlardan rakamları ve noktalama
 işaretlerini temizler, State boşsa City değerini kullanır, yaygın ülke adlarını ISO kodlarına çevirir
-ve telefon ile faks numaralarını numara ve ülke kodu olarak ayırır.
+ve telefon ile faks numaralarını numara ve ülke kodu olarak ayırır. Kendi uluslararası önekiyle
+yazılmış bir numara (`+44 20 ...`, `0044 20 ...`), başka bir ülke kodu verilse bile kendi ülke kodunu korur.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -868,16 +894,21 @@ paylaşmayın; her goroutine için ayrı bir tane oluşturun.
 
 ## Hata yönetimi
 
-- Gateway hataları `Code: "API_<HTTP status>"` döndürür. Mesaj gateway'den gelir; boş bir hata gövdesi
-  `HTTP 429 - Too Many Requests` (ve benzerleri) olur, doğrulama hataları `Details` içinde alan alan
-  listelenir (`Admin PostalCode - 'PostalCode' is required`) ve `Exception of type '...' was thrown`
-  gibi arka uç kalıp metinleri işe yarar ayrıntılarla değiştirilir.
+- Gateway hataları `Code: "API_<HTTP status>"` döndürür. Gateway kendi hata kodunu gönderdiyse
+  (örneğin `Dna.DomainService:Domain:10007`), bu kod `GatewayCode` olarak eklenir; böylece çağıran
+  taraf "alan adı bulunamadı" ile "TLD desteklenmiyor" durumlarını ayırt edebilir. Mesaj gateway'den
+  gelir; boş bir hata gövdesi `HTTP 429 - Too Many Requests` (ve benzerleri) olur, doğrulama hataları
+  `Details` içinde alan alan listelenir (`Admin PostalCode - 'PostalCode' is required`) ve
+  `Exception of type '...' was thrown` gibi arka uç kalıp metinleri gateway'in ayrıntılarıyla ya da
+  hata kodunu belirten sabit bir mesajla değiştirilir — asla ham yanıt gövdesiyle değil.
 - 301/302 yanıtı, kimlik bilgilerinin reddedildiği anlamına gelir: `Message: "Invalid API credentials"`.
 - Aktarım hataları (zaman aşımı, DNS, TLS, bağlantı sıfırlanması) her zaman hatadır, asla boş bir
-  başarılı yanıt değildir. Zaman aşımı `Code: "API_28"` ve `Could not reach the DomainNameAPI service: the connection
-  timed out. (...)` döndürür; diğer hatalar curl tarzı numaralar (`API_6` DNS, `API_7` bağlantı,
-  `API_35` TLS, `API_56` sıfırlama, `API_60` sertifika) ve `Curl error during request: ...` kullanır.
-  `GetParsedResponseData()["Code"]` değeri `CURL_<n>` içerir.
+  başarılı yanıt değildir. Zaman aşımı `Code: "CURL_28"` ve `Could not reach the DomainNameAPI service: the connection
+  timed out. (...)` döndürür; diğer hatalar curl tarzı numaralar (`CURL_6` DNS, `CURL_7` bağlantı,
+  `CURL_35` TLS, `CURL_56` sıfırlama, `CURL_60` sertifika) ve `Curl error during request: ...` kullanır.
+  `API_<n>` yalnızca HTTP durum kodlarına ayrılmıştır.
+- Kayıt, transfer ve yenileme işlemlerinde `"success": false` içeren HTTP 200 yanıtları birer rettir:
+  gateway'in mesajıyla birlikte `REGISTER_DOMAIN`, `TRANSFER_DOMAIN` veya `RENEW_DOMAIN` döner.
 - Boş veya `null` bir başarılı yanıt gövdesi `Code: "RESPONSE"` döndürür.
 - Zaman aşımları: çağrı başına 30 saniye, bağlantı kurmak için 10 saniye.
 
@@ -946,7 +977,7 @@ docker run --rm -v "$PWD":/src -w /src golang:1.23 go vet ./...
 ```
 
 Test paketi; HTTP katmanı, hata eşleme, telemetri ve yardımcı araçlar için birim testleri ile
-`testdata/conformance` altındaki 126 php-dna fixture'ının tamamını yeniden oynatan bir uyumluluk
+`testdata/conformance` altındaki 134 php-dna fixture'ının tamamını yeniden oynatan bir uyumluluk
 (conformance) testi içerir (ağa giden istekler ve dönüş değerleri php-dna ile birebir eşleşmelidir).
 Hiçbir test ağa erişmez.
 
@@ -964,9 +995,12 @@ Hiçbir test ağa erişmez.
 | 2304 | Nesne durumu işleme izin vermiyor              | Domain durumu güncellemeye müsait değildir, güncelleme işlemlerine kilitlenmiştir. Durum "clientupdateprohibited" olmamalı. Diğer durum koşullarından kaynaklanabilir. |
 
 Kütüphane kodları: `RESPONSE` (boş yanıt), `CREDENTIALS` (hesap uç noktasından geçersiz yanıt biçimi),
-`AVAILABILITY` (alan adı verilmedi), `TRANSFER_NOT_AVAILABLE`, `DOMAIN_RENEW` (bitiş tarihi olmadan
-yenileme), `ADD_ZONE`, `EDIT_ZONE`, `SET_ZONE`, `DELETE_ZONE` (desteklenmeyen kayıt türü veya değer
-bulunamadı), `SET_FORWARD` (desteklenmeyen yönlendirme türü veya boş adres).
+`AVAILABILITY` (alan adı verilmedi), `BALANCE` (para birimi hesap tarafından bildirilmiyor),
+`TRANSFER_NOT_AVAILABLE`, `REGISTER_DOMAIN` / `TRANSFER_DOMAIN` / `RENEW_DOMAIN` (gateway işlemi
+reddetti), `DOMAIN_RENEW` (bitiş tarihi olmadan yenileme), `ADD_ZONE`, `EDIT_ZONE`, `SET_ZONE`,
+`DELETE_ZONE` (desteklenmeyen kayıt türü veya değer bulunamadı), `SET_FORWARD` (desteklenmeyen
+yönlendirme türü veya boş adres), `CURL_<n>` (aktarım hatası), `API_<status>` (HTTP hatası; gateway
+kendi kodunu gönderdiyse `GatewayCode` ile birlikte).
 
 ## Lisans
 

@@ -115,9 +115,10 @@ map[string]any{"result": "OK", "data": map[string]any{ /* ... */ }}
 map[string]any{
 	"result": "ERROR",
 	"error": map[string]any{
-		"Code":    "API_404",      // API_<حالة HTTP>، أو رمز من المكتبة مثل RESPONSE
-		"Message": "The domain name you requested could not be found. Please check and try again.",
-		"Details": "The domain could not be found. Please check and try again.",
+		"Code":        "API_404", // API_<حالة HTTP>، أو CURL_<n>، أو رمز من المكتبة مثل RESPONSE
+		"Message":     "The domain name you requested could not be found. Please check and try again.",
+		"Details":     "The domain could not be found. Please check and try again.",
+		"GatewayCode": "Dna.DomainService:Domain:10007", // فقط مع API_<status>، عندما ترسل البوابة رمزها الخاص
 	},
 }
 ```
@@ -135,8 +136,7 @@ map[string]any{
 لا تدعم Go الوسائط الافتراضية. تحافظ الدوال على ترتيب المعاملات في php-dna وتأخذ كل وسيط بشكل
 صريح؛ وتُعرض القيمة الافتراضية في php-dna في كل قسم أدناه. ولتسهيل الاستخدام، تختار بعض القيم الصفرية
 القيمة الافتراضية: `GetCurrentBalance("")` تعني USD، و `GetTldList(0)` تعني 20،
-و `CheckAvailability(..., "")` تعني `create`، و `SetForwarding(..., "")` تعني `Standard`،
-و `ModifyPrivacyProtectionStatus(..., "")` تعني `Owner request`.
+و `CheckAvailability(..., "")` تعني `create`، و `SetForwarding(..., "")` تعني `Standard`.
 تأخذ `RegisterWithContactInfo` وسائطها الاختيارية الأربعة ضمن `*RegisterOptions` (القيمة nil = القيم الافتراضية).
 تأخذ `AddResourceRecordValue` و `ReplaceResourceRecordValue` المعامل `ttl *int`: القيمة `nil` تُبقي
 على TTL الحالي للمجموعة.
@@ -160,7 +160,8 @@ contacts = dna.AllRoles(contact)                 // جهة الاتصال نفس
 contacts = dna.ContactsFromMap(map[string]map[string]any{ /* role => contact */ })
 ```
 
-تُستكمل جهات الاتصال الناقصة وفق قواعد `ValidateContact` قبل إرسالها.
+تُستكمل جهات الاتصال الناقصة وفق قواعد `ValidateContact` قبل إرسالها. تُستخدم جهات الاتصال في
+`RegisterWithContactInfo` و `SaveContacts`؛ أما عمليات النقل فلا ترسل جهات اتصال أبدًا.
 
 ### أسماء الدوال
 
@@ -244,7 +245,8 @@ map[string]any{
 ```
 
 تُجيب نقطة نهاية التسجيل بسجل مختصر، لذا تكون معظم الحقول فارغة؛ استدعِ `GetDetails`
-بعد ذلك للحصول على بيانات النطاق كاملة.
+بعد ذلك للحصول على بيانات النطاق كاملة. عندما ترفض البوابة التسجيل (HTTP 200 مع
+`"success": false`) تكون النتيجة خطأً بالرمز `REGISTER_DOMAIN` مع رسالة البوابة.
 
 </details>
 
@@ -263,6 +265,9 @@ result := client.Renew("example.com", 1)
 map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03-15T10:00:00"}}
 ```
 
+رفض البوابة (`"success": false`) يُعيد الرمز `RENEW_DOMAIN`؛ والنجاح دون تاريخ انتهاء
+يُعيد `DOMAIN_RENEW`.
+
 </details>
 
 <hr style="border: 4px solid #000; border-style: dashed;">
@@ -270,11 +275,12 @@ map[string]any{"result": "OK", "data": map[string]any{"ExpirationDate": "2026-03
 ### نقل النطاق
 
 ```go
-result := client.Transfer("example.com", "Xy9#mK2$", 1, nil)
+result := client.Transfer("example.com", "Xy9#mK2$", 1)
 ```
 
-كما في الواجهة (facade) الخاصة بـ php-dna، لا يُمرَّر وسيط جهات الاتصال: يحمل طلب النقل دائمًا
-قائمة جهات اتصال فارغة. للنتيجة الشكل نفسه الذي تُعيده `GetDetails`.
+لا ترسل عمليات النقل جهات اتصال أبدًا: إذ يتسلّمها المسجّل مع النطاق، لذا يحمل الطلب دائمًا قائمة
+جهات اتصال فارغة ولا تملك الدالة معامل جهات اتصال. للنتيجة الشكل نفسه الذي تُعيده `GetDetails`؛
+ورفض البوابة (`"success": false`) يُعيد الرمز `TRANSFER_DOMAIN` مع رسالة البوابة.
 
 <details>
 <summary>مثال على مخرجات نقل النطاق</summary>
@@ -511,13 +517,14 @@ result := client.ModifyNameServer("example.com", []string{"ns1.example.com", "ns
 ```
 
 تُقبل الخريطة (map) أيضًا (تُستخدم قيمها بترتيب المفاتيح). قبل الإرسال، تُزال المسافات الزائدة من
-المُدخلات وتُحوَّل إلى أحرف صغيرة وتُحذف النقطة الأخيرة منها وتُزال القيم المكرّرة.
+المُدخلات وتُحوَّل إلى أحرف صغيرة وتُحذف النقطة الأخيرة منها وتُزال القيم المكرّرة؛ وتُظهر النتيجة
+هذه القائمة الموحَّدة.
 
 <details>
 <summary>مثال على مخرجات تعديل خوادم الأسماء</summary>
 
 ```go
-map[string]any{"result": "OK", "data": map[string]any{"NameServers": []string{"ns1.example.com", "ns2.example.com"}}}
+map[string]any{"result": "OK", "data": map[string]any{"NameServers": []any{"ns1.example.com", "ns2.example.com"}}}
 ```
 
 </details>
@@ -615,6 +622,10 @@ map[string]any{"result": "OK", "data": map[string]any{"NameServer": "ns1.example
 result := client.ModifyPrivacyProtectionStatus("example.com", true, "Owner request")
 ```
 
+قيمة `status` إمّا bool أو قيمة تخزّنها اللوحات: `true` و `1` و `"1"` و `"true"` و `"on"` و `"yes"` تُفعّل
+الخصوصية، وأي قيمة أخرى (`"off"` و `"0"` و `false` ...) تُعطّلها. يُحتفظ بالسبب لأغراض التوافق مع
+php-dna فقط ولا يُرسَل: إذ لا يوجد مثل هذا الحقل في البوابة.
+
 <details>
 <summary>مثال على مخرجات تعديل حالة حماية الخصوصية</summary>
 
@@ -631,6 +642,9 @@ map[string]any{"result": "OK", "data": map[string]any{"PrivacyProtectionStatus":
 ```go
 result := client.GetContacts("example.com")
 ```
+
+تُطابَق أنواع جهات الاتصال القادمة من البوابة دون تمييز لحالة الأحرف (`Admin`/`Administrative` و `Tech`/`Technical`
+و `Registrant`/`Owner` و `Billing`)؛ وأي نوع آخر يُحتفظ به تحت اسمه الخاص بحرف أول كبير.
 
 <details>
 <summary>مثال على مخرجات الحصول على معلومات الاتصال</summary>
@@ -701,7 +715,7 @@ map[string]any{
 	"symbol":   "$",
 	"balances": []any{
 		map[string]any{"balance": "601.64", "currency": "USD", "symbol": "$"},
-		map[string]any{"balance": "1250.5", "currency": "TL", "symbol": "TL"},
+		map[string]any{"balance": "1250.50", "currency": "TL", "symbol": "TL"},
 	},
 }
 ```
@@ -732,8 +746,10 @@ map[string]any{
 }
 ```
 
-عند الفشل: تكون `ErrorCode` هي `API_<status>`، و `OperationMessage` هي رسالة الخطأ،
-و `OperationResult` هي `"FAILED"`، و `Balance` هي `"0.00"`.
+عند الفشل: تكون `ErrorCode` هي `API_<status>` (أو `CURL_<n>`)، و `OperationMessage` هي رسالة الخطأ،
+و `OperationResult` هي `"FAILED"`، و `Balance` هي `"0.00"`. لا يُبلغ الحساب إلا عن أرصدة USD و TRY:
+لأي عملة أخرى تكون النتيجة `FAILED` مع `ErrorCode: "BALANCE"` والرسالة
+`No EUR balance is reported for this account. Available: USD, TRY.`
 
 </details>
 
@@ -745,9 +761,10 @@ map[string]any{
 تستبدل المجموعة كاملة. يمكن إعطاء أسماء السجلات بالصيغة `@` أو `""` أو جذر المنطقة (apex) أو تسمية نسبية
 (`www`) أو اسم كامل (`www.example.com`)؛ وتُختزل جميعها إلى التسمية النسبية التي تتوقعها البوابة.
 الأنواع المدعومة: `A` و `AAAA` و `ALIAS` و `CAA` و `CNAME` و `DS` و `MX` و `NAPTR` و `PTR` و `SRV`
-و `TLSA` و `TXT` (تُرفض الأنواع الأخرى قبل إجراء أي استدعاء). تُحصر قيمة TTL ضمن النطاق 1..86400. مع `apply = true`
-(القيمة الافتراضية في php-dna) تُعتمد التغييرات فورًا؛ ويُفصل بين استدعاءات المنطقة المتتالية بثانية
-واحدة على الأقل لأن البوابة تحدّ من معدل الطلبات المتلاحقة.
+و `TLSA` و `TXT` (تُرفض الأنواع الأخرى قبل إجراء أي استدعاء). تُحصر قيمة TTL ضمن النطاق 1..86400، وتُظهر النتيجة
+النوع بأحرف كبيرة وقيمة TTL اللذين أُرسلا فعليًا. مع `apply = true` (القيمة الافتراضية في php-dna)
+تُعتمد التغييرات فورًا؛ وإذا فشل هذا الاعتماد يُعاد غلاف الخطأ الخاص به (ويبقى التغيير في وضع الانتظار).
+ويُفصل بين استدعاءات المنطقة المتتالية بثانية واحدة على الأقل لأن البوابة تحدّ من معدل الطلبات المتلاحقة.
 
 ```go
 // القائمة: صف واحد لكل قيمة، والأسماء مؤهّلة بالكامل
@@ -821,14 +838,20 @@ client.DeleteForwarding("example.com")
 // SetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// GetForwarding (في حال عدم إعداد إعادة توجيه: Enabled تساوي false، والنتيجة تبقى OK)
+// GetForwarding
 map[string]any{"result": "OK", "data": map[string]any{"Enabled": true, "RedirectAddress": "https://www.example.org", "ForwardType": "Standard"}}
 
-// DeleteForwarding
-map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com"}}
+// GetForwarding عند عدم إعداد أي إعادة توجيه
+map[string]any{"result": "OK", "data": map[string]any{"Enabled": false, "RedirectAddress": "", "ForwardType": ""}}
+
+// DeleteForwarding (تكون Removed مساوية لـ false عندما لا يكون هناك شيء مُعدّ)
+map[string]any{"result": "OK", "data": map[string]any{"DomainName": "example.com", "Removed": true}}
 ```
 
 </details>
+
+فقط إجابة البوابة "Redirect information not found" تعني "غير مُعدّ"؛ وأي خطأ آخر، مثل نطاق
+غير معروف، يُعاد كخطأ.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -845,7 +868,8 @@ client.ValidateContact(map[string]any{"FirstName": " Jo ", "Phone": "+90 (532) 3
 
 تملأ `ValidateContact` الحقول الناقصة بقيم بديلة، وتزيل الأرقام وعلامات الترقيم من الأسماء،
 وتستخدم المدينة عند غياب الولاية، وتحوّل أسماء الدول الشائعة إلى رموز ISO، وتفصل أرقام الهاتف
-والفاكس إلى الرقم ورمز الدولة.
+والفاكس إلى الرقم ورمز الدولة. الرقم المكتوب ببادئته الدولية الخاصة (`+44 20 ...` و `0044 20 ...`)
+يحتفظ برمز دولته الخاص حتى عند إعطاء رمز آخر.
 
 <hr style="border: 4px solid #000; border-style: dashed;">
 
@@ -866,16 +890,21 @@ client.SetServiceURL("https://ote.domainresellerapi.com/api/v1")
 
 ## معالجة الأخطاء
 
-- تُعيد أخطاء البوابة `Code: "API_<HTTP status>"`. تأتي الرسالة من البوابة؛ ويصبح جسم الخطأ الفارغ
+- تُعيد أخطاء البوابة `Code: "API_<HTTP status>"`. وعندما ترسل البوابة رمز خطأ خاصًا بها
+  (مثل `Dna.DomainService:Domain:10007`)، يُضاف بوصفه `GatewayCode`، ليتمكن المستدعي من التمييز بين
+  "النطاق غير موجود" و"TLD غير مدعوم". تأتي الرسالة من البوابة؛ ويصبح جسم الخطأ الفارغ
   `HTTP 429 - Too Many Requests` (وهكذا)، وتُسرد أخطاء التحقق حقلًا تلو الآخر
   في `Details` (`Admin PostalCode - 'PostalCode' is required`)، وتُستبدل العبارات النمطية للواجهة الخلفية مثل
-  `Exception of type '...' was thrown` بالتفاصيل المفيدة.
+  `Exception of type '...' was thrown` بتفاصيل البوابة، أو برسالة ثابتة تذكر رمز الخطأ — ولا تُستبدل
+  أبدًا بجسم الاستجابة الخام.
 - الاستجابة 301/302 تعني أن بيانات الاعتماد قد رُفضت: `Message: "Invalid API credentials"`.
 - أعطال النقل (انتهاء المهلة، DNS، TLS، إعادة تعيين الاتصال) تُعدّ أخطاء، ولا تكون أبدًا نجاحًا فارغًا.
-  عند انتهاء المهلة تُعاد `Code: "API_28"` والرسالة `Could not reach the DomainNameAPI service: the connection
-  timed out. (...)`؛ وتستخدم الأعطال الأخرى أرقامًا على نمط curl (`API_6` لـ DNS، و `API_7` للاتصال، و `API_35`
-  لـ TLS، و `API_56` لإعادة التعيين، و `API_60` للشهادة) مع الرسالة `Curl error during request: ...`.
-  تحتوي `GetParsedResponseData()["Code"]` على `CURL_<n>`.
+  عند انتهاء المهلة تُعاد `Code: "CURL_28"` والرسالة `Could not reach the DomainNameAPI service: the connection
+  timed out. (...)`؛ وتستخدم الأعطال الأخرى أرقامًا على نمط curl (`CURL_6` لـ DNS، و `CURL_7` للاتصال،
+  و `CURL_35` لـ TLS، و `CURL_56` لإعادة التعيين، و `CURL_60` للشهادة) مع الرسالة `Curl error during request: ...`.
+  الصيغة `API_<n>` محجوزة لحالات HTTP.
+- إجابات التسجيل والنقل والتجديد ذات HTTP 200 مع `"success": false` تُعدّ رفضًا:
+  `REGISTER_DOMAIN` أو `TRANSFER_DOMAIN` أو `RENEW_DOMAIN` مع رسالة البوابة.
 - جسم النجاح الفارغ أو `null` يُعيد `Code: "RESPONSE"`.
 - المهل الزمنية: 30 ثانية لكل استدعاء، و 10 ثوانٍ لإنشاء الاتصال.
 
@@ -944,7 +973,7 @@ docker run --rm -v "$PWD":/src -w /src golang:1.23 go vet ./...
 ```
 
 تتضمن مجموعة الاختبارات اختبارات وحدات لطبقة HTTP وربط الأخطاء والقياس عن بُعد والأدوات المساعدة،
-واختبار توافق يعيد تشغيل جميع حالات php-dna البالغ عددها 126 من `testdata/conformance` (يجب أن تتطابق
+واختبار توافق يعيد تشغيل جميع حالات php-dna البالغ عددها 134 من `testdata/conformance` (يجب أن تتطابق
 الطلبات المُرسَلة عبر الشبكة والقيم المُعادة مع php-dna تمامًا). لا يتصل أي اختبار بالشبكة.
 
 ## رموز العودة والأخطاء مع تفسيراتها
@@ -961,9 +990,11 @@ docker run --rm -v "$PWD":/src -w /src golang:1.23 go vet ./...
 | 2304 | حالة الكائن تمنع العملية | حالة النطاق غير مناسبة للتحديث، وهو مقفل لعمليات التحديث. يجب ألّا تكون الحالة "clientupdateprohibited". قد يكون ذلك بسبب شروط حالة أخرى. |
 
 رموز المكتبة: `RESPONSE` (استجابة فارغة)، و `CREDENTIALS` (صيغة استجابة غير صالحة من نقطة نهاية
-الحساب)، و `AVAILABILITY` (لم تُعطَ أسماء نطاقات)، و `TRANSFER_NOT_AVAILABLE`، و `DOMAIN_RENEW`
-(تجديد دون تاريخ انتهاء)، و `ADD_ZONE` و `EDIT_ZONE` و `SET_ZONE` و `DELETE_ZONE` (نوع سجل غير
-مدعوم أو قيمة غير موجودة)، و `SET_FORWARD` (نوع إعادة توجيه غير مدعوم أو عنوان فارغ).
+الحساب)، و `AVAILABILITY` (لم تُعطَ أسماء نطاقات)، و `BALANCE` (عملة لا يُبلغ عنها الحساب)،
+و `TRANSFER_NOT_AVAILABLE`، و `REGISTER_DOMAIN` / `TRANSFER_DOMAIN` / `RENEW_DOMAIN` (رفضت البوابة
+العملية)، و `DOMAIN_RENEW` (تجديد دون تاريخ انتهاء)، و `ADD_ZONE` و `EDIT_ZONE` و `SET_ZONE` و `DELETE_ZONE`
+(نوع سجل غير مدعوم أو قيمة غير موجودة)، و `SET_FORWARD` (نوع إعادة توجيه غير مدعوم أو عنوان فارغ)،
+و `CURL_<n>` (عطل في النقل)، و `API_<status>` (خطأ HTTP، مع `GatewayCode` عندما ترسل البوابة رمزها الخاص).
 
 ## الترخيص
 
